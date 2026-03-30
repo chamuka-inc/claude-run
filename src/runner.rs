@@ -68,11 +68,7 @@ impl CommandRunner for TokioCommandRunner {
             .await?;
 
         // Also capture for the fix prompt (re-run capturing output)
-        let captured = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()
-            .await?;
+        let captured = Command::new("sh").arg("-c").arg(cmd).output().await?;
 
         Ok(RunResult {
             exit_code: output.status.code().unwrap_or(1),
@@ -115,11 +111,7 @@ impl<R: CommandRunner> ClaudeRunner<R> {
     }
 
     /// Run claude with automatic rate-limit retry and backoff.
-    pub async fn run_with_retry(
-        &self,
-        prompt: &str,
-        is_resume: bool,
-    ) -> Result<(), RunError> {
+    pub async fn run_with_retry(&self, prompt: &str, is_resume: bool) -> Result<(), RunError> {
         let mut backoff = Backoff::new(self.config.retry_delay, self.config.retry_cap);
         let mut attempt: u32 = 0;
         let mut resume = is_resume;
@@ -127,11 +119,7 @@ impl<R: CommandRunner> ClaudeRunner<R> {
 
         loop {
             let args = self.build_args(&current_prompt, resume);
-            let result = self
-                .cmd
-                .run_claude(&args)
-                .await
-                .map_err(RunError::Io)?;
+            let result = self.cmd.run_claude(&args).await.map_err(RunError::Io)?;
 
             if result.exit_code == 0 {
                 return Ok(());
@@ -172,7 +160,10 @@ impl<R: CommandRunner> ClaudeRunner<R> {
             self.config.daily_cap_timeout.as_secs(),
         );
         notify::notify(
-            &format!("Likely daily cap — waiting for reset: {}", self.session_name),
+            &format!(
+                "Likely daily cap — waiting for reset: {}",
+                self.session_name
+            ),
             self.config.notify,
         );
 
@@ -190,7 +181,11 @@ impl<R: CommandRunner> ClaudeRunner<R> {
                 "1".to_string(),
                 "ping".to_string(),
             ];
-            let result = self.cmd.run_claude(&probe_args).await.map_err(RunError::Io)?;
+            let result = self
+                .cmd
+                .run_claude(&probe_args)
+                .await
+                .map_err(RunError::Io)?;
 
             if result.exit_code == 0 {
                 output::daily_cap_lifted();

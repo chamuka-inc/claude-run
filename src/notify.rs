@@ -12,10 +12,7 @@ pub fn notify(message: &str, enabled: bool) {
             "display notification \"{}\" with title \"claude-run\"",
             message.replace('\\', "\\\\").replace('"', "\\\"")
         );
-        let _ = Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .output();
+        let _ = Command::new("osascript").arg("-e").arg(&script).output();
     }
 
     #[cfg(not(target_os = "macos"))]

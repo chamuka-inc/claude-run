@@ -9,7 +9,6 @@ name = "claude-run"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 colored = "3"
 async-trait = "0.1"

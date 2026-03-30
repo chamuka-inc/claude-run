@@ -16,10 +16,7 @@ fn help_flag_shows_usage() {
 
 #[test]
 fn no_args_exits_with_error() {
-    Command::cargo_bin("claude-run")
-        .unwrap()
-        .assert()
-        .failure();
+    Command::cargo_bin("claude-run").unwrap().assert().failure();
 }
 
 #[test]

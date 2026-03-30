@@ -81,16 +81,15 @@ pub fn verify_exhausted(max: u32) {
     println!();
     eprintln!(
         "{}",
-        format!("Verification still failing after {max} rounds.").red().bold()
+        format!("Verification still failing after {max} rounds.")
+            .red()
+            .bold()
     );
 }
 
 pub fn claude_error(exit_code: i32) {
     println!();
-    eprintln!(
-        "{}",
-        format!("Claude exited with code {exit_code}.").red()
-    );
+    eprintln!("{}", format!("Claude exited with code {exit_code}.").red());
 }
 
 pub fn daily_cap_waiting(max_retries: u32, poll_secs: u64, timeout_secs: u64) {

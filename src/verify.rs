@@ -221,17 +221,45 @@ mod tests {
         let mock = SequencedRunner::new(
             // Claude "fixes" succeed each time
             vec![
-                RunResult { exit_code: 0, stdout: String::new(), stderr: String::new() },
-                RunResult { exit_code: 0, stdout: String::new(), stderr: String::new() },
-                RunResult { exit_code: 0, stdout: String::new(), stderr: String::new() },
+                RunResult {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                RunResult {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                RunResult {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
             ],
             // But verify always fails
             vec![
-                RunResult { exit_code: 1, stdout: "fail".into(), stderr: String::new() },
-                RunResult { exit_code: 1, stdout: "fail".into(), stderr: String::new() },
-                RunResult { exit_code: 1, stdout: "fail".into(), stderr: String::new() },
+                RunResult {
+                    exit_code: 1,
+                    stdout: "fail".into(),
+                    stderr: String::new(),
+                },
+                RunResult {
+                    exit_code: 1,
+                    stdout: "fail".into(),
+                    stderr: String::new(),
+                },
+                RunResult {
+                    exit_code: 1,
+                    stdout: "fail".into(),
+                    stderr: String::new(),
+                },
                 // Final verify after last fix also fails
-                RunResult { exit_code: 1, stdout: "fail".into(), stderr: String::new() },
+                RunResult {
+                    exit_code: 1,
+                    stdout: "fail".into(),
+                    stderr: String::new(),
+                },
             ],
         );
         let runner = ClaudeRunner {

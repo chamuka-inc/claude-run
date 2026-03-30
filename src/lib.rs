@@ -62,10 +62,7 @@ pub async fn run(cli: Cli) -> i32 {
             VerifyOutcome::Passed { .. } => {}
             VerifyOutcome::ExhaustedRounds => return 1,
             VerifyOutcome::ClaudeFailed { exit_code, .. } => {
-                notify::notify(
-                    &format!("Fix failed: {session_name}"),
-                    config.notify,
-                );
+                notify::notify(&format!("Fix failed: {session_name}"), config.notify);
                 return exit_code;
             }
         }
