@@ -156,6 +156,17 @@ pub fn done(session_name: &str) {
     );
 }
 
+// ─── Parallel execution output ─────────────────────────────────────
+
+pub fn parallel_start(count: usize) {
+    println!();
+    println!("{} ({count} steps)", "Running in parallel".cyan().bold(),);
+}
+
+pub fn parallel_done() {
+    println!("{}", "Parallel steps complete.".cyan(),);
+}
+
 // ─── Adversarial verification output ───────────────────────────────
 
 pub fn av_round(round: u32, max: u32) {

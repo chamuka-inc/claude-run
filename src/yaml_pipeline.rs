@@ -76,6 +76,9 @@ enum RawStage {
         max_rounds: Option<u32>,
         verifier: RawVerifier,
     },
+
+    #[serde(rename = "parallel")]
+    Parallel { name: String, stages: Vec<RawStage> },
 }
 
 impl RawStage {
@@ -83,7 +86,8 @@ impl RawStage {
         match self {
             Self::Claude { name, .. }
             | Self::Shell { name, .. }
-            | Self::VerifyLoop { name, .. } => name,
+            | Self::VerifyLoop { name, .. }
+            | Self::Parallel { name, .. } => name,
         }
     }
 }
@@ -209,6 +213,84 @@ fn resolve(raw: RawPipeline) -> Result<Pipeline, YamlError> {
                     verifier: resolved_verifier,
                     max_rounds: max_rounds.unwrap_or(3),
                 });
+            }
+
+            RawStage::Parallel {
+                name,
+                stages: inner_stages,
+            } => {
+                let mut inner_steps = Vec::new();
+                for inner in inner_stages {
+                    // Reject nested parallel
+                    if matches!(inner, RawStage::Parallel { .. }) {
+                        errors.push(format!(
+                            "Stage '{name}': nested parallel stages are not supported"
+                        ));
+                        continue;
+                    }
+                    match inner {
+                        RawStage::Claude {
+                            name: inner_name,
+                            prompt,
+                            prompt_file,
+                            session_suffix,
+                            model,
+                            capture_output,
+                            extra_args,
+                        } => {
+                            let resolved_prompt =
+                                resolve_prompt(prompt, prompt_file, inner_name, &mut errors);
+                            let stage = Stage::Claude {
+                                role: inner_name.clone(),
+                                prompt: resolved_prompt,
+                                session_suffix: session_suffix.clone().unwrap_or_default(),
+                                model: model.clone(),
+                                capture_output: *capture_output,
+                                extra_args: extra_args.clone(),
+                            };
+                            named_stages.insert(inner_name.clone(), stage.clone());
+                            inner_steps.push(PipelineStep::Run(stage));
+                        }
+                        RawStage::Shell {
+                            name: inner_name,
+                            command,
+                        } => {
+                            let stage = Stage::Shell {
+                                role: inner_name.clone(),
+                                command: command.clone(),
+                            };
+                            named_stages.insert(inner_name.clone(), stage.clone());
+                            inner_steps.push(PipelineStep::Run(stage));
+                        }
+                        RawStage::VerifyLoop {
+                            name: inner_name,
+                            worker,
+                            max_rounds,
+                            verifier,
+                        } => {
+                            let worker_stage = match named_stages.get(worker) {
+                                Some(s) => s.clone(),
+                                None => {
+                                    errors.push(format!(
+                                        "Stage '{inner_name}': worker '{worker}' not found (must be defined earlier)"
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let resolved_verifier =
+                                resolve_verifier(verifier, inner_name, &mut errors);
+                            inner_steps.push(PipelineStep::VerifyLoop {
+                                worker: worker_stage,
+                                verifier: resolved_verifier,
+                                max_rounds: max_rounds.unwrap_or(3),
+                            });
+                        }
+                        RawStage::Parallel { .. } => {} // already handled above
+                    }
+                }
+                if !inner_steps.is_empty() {
+                    steps.push(PipelineStep::Parallel(inner_steps));
+                }
             }
         }
     }
@@ -808,6 +890,115 @@ stages:
                 other => panic!("expected Claude verifier, got {other:?}"),
             },
             other => panic!("expected VerifyLoop, got {other:?}"),
+        }
+    }
+
+    // ─── Parallel stage tests ──────────────────────────────────────
+
+    #[test]
+    fn parse_parallel_stage() {
+        let yaml = r#"
+stages:
+  - name: checks
+    type: parallel
+    stages:
+      - name: lint
+        type: shell
+        command: "make lint"
+      - name: typecheck
+        type: shell
+        command: "make typecheck"
+"#;
+        let pipeline = parse_pipeline(yaml).unwrap();
+        assert_eq!(pipeline.steps.len(), 1);
+        match &pipeline.steps[0] {
+            PipelineStep::Parallel(inner) => {
+                assert_eq!(inner.len(), 2);
+                assert!(matches!(&inner[0], PipelineStep::Run(Stage::Shell { .. })));
+                assert!(matches!(&inner[1], PipelineStep::Run(Stage::Shell { .. })));
+            }
+            other => panic!("expected Parallel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_parallel_with_mixed_types() {
+        let yaml = r#"
+stages:
+  - name: work
+    type: parallel
+    stages:
+      - name: implement
+        type: claude
+        prompt: "Implement"
+      - name: lint
+        type: shell
+        command: "make lint"
+"#;
+        let pipeline = parse_pipeline(yaml).unwrap();
+        match &pipeline.steps[0] {
+            PipelineStep::Parallel(inner) => {
+                assert_eq!(inner.len(), 2);
+                assert!(matches!(&inner[0], PipelineStep::Run(Stage::Claude { .. })));
+                assert!(matches!(&inner[1], PipelineStep::Run(Stage::Shell { .. })));
+            }
+            other => panic!("expected Parallel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_nested_parallel() {
+        let yaml = r#"
+stages:
+  - name: outer
+    type: parallel
+    stages:
+      - name: inner
+        type: parallel
+        stages:
+          - name: lint
+            type: shell
+            command: "make lint"
+"#;
+        let err = parse_pipeline(yaml).unwrap_err();
+        assert!(err.messages.iter().any(|m| m.contains("nested parallel")));
+    }
+
+    #[test]
+    fn parallel_with_verify_loop() {
+        let yaml = r#"
+stages:
+  - name: implement
+    type: claude
+    prompt: "Implement"
+  - name: checks
+    type: parallel
+    stages:
+      - name: verify-impl
+        type: verify-loop
+        worker: implement
+        verifier:
+          type: shell
+          command: "make test"
+      - name: lint
+        type: shell
+        command: "make lint"
+"#;
+        let pipeline = parse_pipeline(yaml).unwrap();
+        // implement remains as a top-level Run (the parallel verify-loop doesn't remove it
+        // from the top-level steps since it's inside a nested block)
+        assert_eq!(pipeline.steps.len(), 2);
+        assert!(matches!(
+            &pipeline.steps[0],
+            PipelineStep::Run(Stage::Claude { .. })
+        ));
+        match &pipeline.steps[1] {
+            PipelineStep::Parallel(inner) => {
+                assert_eq!(inner.len(), 2);
+                assert!(matches!(&inner[0], PipelineStep::VerifyLoop { .. }));
+                assert!(matches!(&inner[1], PipelineStep::Run(Stage::Shell { .. })));
+            }
+            other => panic!("expected Parallel, got {other:?}"),
         }
     }
 }

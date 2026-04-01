@@ -27,6 +27,7 @@ pub trait CommandRunner: Send + Sync {
 }
 
 /// Real implementation using tokio::process.
+#[derive(Clone)]
 pub struct TokioCommandRunner;
 
 #[async_trait]

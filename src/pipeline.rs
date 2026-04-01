@@ -26,6 +26,9 @@ pub enum PipelineStep {
         verifier: Verifier,
         max_rounds: u32,
     },
+
+    /// Run multiple steps concurrently. All must succeed.
+    Parallel(Vec<PipelineStep>),
 }
 
 // ─── Pipeline outcomes ─────────────────────────────────────────────
@@ -66,32 +69,97 @@ pub struct PipelineRunner<R: CommandRunner> {
     pub extra_args: Vec<String>,
 }
 
-impl<R: CommandRunner> PipelineRunner<R> {
+impl<R: CommandRunner + Clone + 'static> PipelineRunner<R> {
     /// Run an entire pipeline to completion.
     pub async fn run(&self, pipeline: &Pipeline) -> PipelineOutcome {
         for step in &pipeline.steps {
-            match step {
-                PipelineStep::Run(stage) => {
-                    if let Err(e) = self.run_stage(stage, false).await {
-                        return PipelineOutcome::StageFailed {
-                            exit_code: e.exit_code(),
-                        };
-                    }
-                }
-                PipelineStep::VerifyLoop {
-                    worker,
-                    verifier,
-                    max_rounds,
-                } => match self.run_verify_loop(worker, verifier, *max_rounds).await {
-                    VerifyOutcome::Passed { .. } => {}
-                    VerifyOutcome::ExhaustedRounds => return PipelineOutcome::VerifyExhausted,
-                    VerifyOutcome::StageFailed { exit_code, .. } => {
-                        return PipelineOutcome::StageFailed { exit_code };
-                    }
-                },
+            let outcome = match step {
+                PipelineStep::Parallel(steps) => self.run_parallel(steps).await,
+                _ => self.run_step(step).await,
+            };
+            match outcome {
+                PipelineOutcome::Success => {}
+                other => return other,
             }
         }
         PipelineOutcome::Success
+    }
+
+    /// Execute a single pipeline step (non-parallel).
+    async fn run_step(&self, step: &PipelineStep) -> PipelineOutcome {
+        match step {
+            PipelineStep::Run(stage) => {
+                if let Err(e) = self.run_stage(stage, false).await {
+                    PipelineOutcome::StageFailed {
+                        exit_code: e.exit_code(),
+                    }
+                } else {
+                    PipelineOutcome::Success
+                }
+            }
+            PipelineStep::VerifyLoop {
+                worker,
+                verifier,
+                max_rounds,
+            } => match self.run_verify_loop(worker, verifier, *max_rounds).await {
+                VerifyOutcome::Passed { .. } => PipelineOutcome::Success,
+                VerifyOutcome::ExhaustedRounds => PipelineOutcome::VerifyExhausted,
+                VerifyOutcome::StageFailed { exit_code, .. } => {
+                    PipelineOutcome::StageFailed { exit_code }
+                }
+            },
+            PipelineStep::Parallel(_) => {
+                // Nested parallel is rejected at parse time; this is unreachable
+                // from spawned tasks. Only the top-level run() handles Parallel.
+                PipelineOutcome::StageFailed { exit_code: 1 }
+            }
+        }
+    }
+
+    /// Run multiple steps concurrently. All must succeed.
+    async fn run_parallel(&self, steps: &[PipelineStep]) -> PipelineOutcome {
+        output::parallel_start(steps.len());
+
+        let mut set = tokio::task::JoinSet::new();
+
+        for (i, step) in steps.iter().enumerate() {
+            let step = step.clone();
+            let config = self.config.clone();
+            let base_session = self.base_session.clone();
+            let extra_args = self.extra_args.clone();
+            let cmd = self.cmd.clone();
+
+            set.spawn(async move {
+                let runner = PipelineRunner {
+                    cmd,
+                    config,
+                    base_session,
+                    extra_args,
+                };
+                (i, runner.run_step(&step).await)
+            });
+        }
+
+        let mut first_failure: Option<PipelineOutcome> = None;
+        while let Some(result) = set.join_next().await {
+            match result {
+                Ok((_i, PipelineOutcome::Success)) => {}
+                Ok((_i, outcome)) => {
+                    if first_failure.is_none() {
+                        first_failure = Some(outcome);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Parallel task panicked: {e}");
+                    if first_failure.is_none() {
+                        first_failure = Some(PipelineOutcome::StageFailed { exit_code: 1 });
+                    }
+                }
+            }
+        }
+
+        output::parallel_done();
+        first_failure.unwrap_or(PipelineOutcome::Success)
     }
 
     // ─── Stage execution ───────────────────────────────────────────
@@ -883,5 +951,125 @@ mod tests {
         };
         let outcome = runner.run(&pipeline).await;
         assert!(matches!(outcome, PipelineOutcome::StageFailed { .. }));
+    }
+
+    // ─── Parallel execution tests ──────────────────────────────────
+
+    /// A mock that always returns success for any call.
+    struct AlwaysSuccessRunner;
+
+    #[async_trait]
+    impl CommandRunner for AlwaysSuccessRunner {
+        async fn run_claude(&self, _args: &[String]) -> std::io::Result<RunResult> {
+            Ok(RunResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+        async fn run_claude_capturing(&self, args: &[String]) -> std::io::Result<RunResult> {
+            self.run_claude(args).await
+        }
+        async fn run_shell(&self, _cmd: &str) -> std::io::Result<RunResult> {
+            Ok(RunResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    impl Clone for AlwaysSuccessRunner {
+        fn clone(&self) -> Self {
+            Self
+        }
+    }
+
+    /// A mock that fails for Claude calls and succeeds for shell calls.
+    struct ClaudeFailRunner;
+
+    #[async_trait]
+    impl CommandRunner for ClaudeFailRunner {
+        async fn run_claude(&self, _args: &[String]) -> std::io::Result<RunResult> {
+            Ok(RunResult {
+                exit_code: 2,
+                stdout: String::new(),
+                stderr: "error".into(),
+            })
+        }
+        async fn run_claude_capturing(&self, args: &[String]) -> std::io::Result<RunResult> {
+            self.run_claude(args).await
+        }
+        async fn run_shell(&self, _cmd: &str) -> std::io::Result<RunResult> {
+            Ok(RunResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    impl Clone for ClaudeFailRunner {
+        fn clone(&self) -> Self {
+            Self
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_all_succeed() {
+        let runner = PipelineRunner {
+            cmd: AlwaysSuccessRunner,
+            config: test_config(),
+            base_session: "test".into(),
+            extra_args: vec![],
+        };
+        let pipeline = Pipeline {
+            steps: vec![PipelineStep::Parallel(vec![
+                PipelineStep::Run(Stage::shell("echo a")),
+                PipelineStep::Run(Stage::shell("echo b")),
+                PipelineStep::Run(Stage::claude_worker("do something")),
+            ])],
+        };
+        let outcome = runner.run(&pipeline).await;
+        assert!(matches!(outcome, PipelineOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn parallel_one_fails() {
+        let runner = PipelineRunner {
+            cmd: ClaudeFailRunner,
+            config: test_config(),
+            base_session: "test".into(),
+            extra_args: vec![],
+        };
+        let pipeline = Pipeline {
+            steps: vec![PipelineStep::Parallel(vec![
+                PipelineStep::Run(Stage::shell("echo ok")),
+                PipelineStep::Run(Stage::claude_worker("will fail")),
+            ])],
+        };
+        let outcome = runner.run(&pipeline).await;
+        assert!(matches!(outcome, PipelineOutcome::StageFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn parallel_followed_by_sequential() {
+        let runner = PipelineRunner {
+            cmd: AlwaysSuccessRunner,
+            config: test_config(),
+            base_session: "test".into(),
+            extra_args: vec![],
+        };
+        let pipeline = Pipeline {
+            steps: vec![
+                PipelineStep::Parallel(vec![
+                    PipelineStep::Run(Stage::shell("echo a")),
+                    PipelineStep::Run(Stage::shell("echo b")),
+                ]),
+                PipelineStep::Run(Stage::claude_worker("do something")),
+            ],
+        };
+        let outcome = runner.run(&pipeline).await;
+        assert!(matches!(outcome, PipelineOutcome::Success));
     }
 }
