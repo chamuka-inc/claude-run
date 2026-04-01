@@ -28,6 +28,7 @@ pub trait CommandRunner: Send + Sync {
 }
 
 /// Real implementation using tokio::process.
+#[derive(Clone)]
 pub struct TokioCommandRunner;
 
 #[async_trait]
@@ -88,7 +89,7 @@ pub struct ClaudeRunner<R: CommandRunner> {
 
 impl<R: CommandRunner> ClaudeRunner<R> {
     /// Build the argument list for a claude invocation.
-    fn build_args(&self, prompt: &str, is_resume: bool) -> Vec<String> {
+    pub fn build_args(&self, prompt: &str, is_resume: bool) -> Vec<String> {
         let mut args = vec![
             "-p".to_string(),
             "--permission-mode".to_string(),
@@ -107,6 +108,15 @@ impl<R: CommandRunner> ClaudeRunner<R> {
         }
 
         args.extend(self.extra_args.iter().cloned());
+        args
+    }
+
+    /// Build args with --output-format stream-json for capturing structured output.
+    /// Used by pipeline review phase to capture the verdict.
+    pub fn build_args_with_output_format(&self, prompt: &str, is_resume: bool) -> Vec<String> {
+        let mut args = self.build_args(prompt, is_resume);
+        args.push("--output-format".to_string());
+        args.push("stream-json".to_string());
         args
     }
 
@@ -303,6 +313,7 @@ mod tests {
             verify_max: 3,
             daily_cap_poll: std::time::Duration::from_millis(1),
             daily_cap_timeout: std::time::Duration::from_millis(10),
+            pipeline_review_rounds: 2,
         }
     }
 

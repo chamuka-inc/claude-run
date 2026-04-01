@@ -113,6 +113,132 @@ pub fn daily_cap_lifted() {
     println!("{}", "Cap lifted! Resuming session...".green().bold());
 }
 
+// ── Pipeline output ──────────────────────────────────────────
+
+pub fn pipeline_banner(session_name: &str, spec_path: &str, verify_cmd: Option<&str>) {
+    let ts = chrono_now();
+    println!(
+        "{}",
+        "╭─ claude-run pipeline ─────────────────────────────╮".magenta()
+    );
+    println!(
+        "{} {} {:<40} {}",
+        "│".magenta(),
+        "Session:".bold(),
+        session_name,
+        "│".magenta()
+    );
+    println!(
+        "{} {} {:<40} {}",
+        "│".magenta(),
+        "Spec:".bold(),
+        spec_path,
+        "│".magenta()
+    );
+    println!(
+        "{} {:<49} {}",
+        "│".magenta(),
+        format!("Started: {ts}").dimmed(),
+        "│".magenta()
+    );
+    if let Some(cmd) = verify_cmd {
+        println!(
+            "{} {} {:<40} {}",
+            "│".magenta(),
+            "Verify:".bold(),
+            cmd,
+            "│".magenta()
+        );
+    }
+    println!(
+        "{} {:<49} {}",
+        "│".magenta(),
+        "Phases: spec → implement → test → verify → review".dimmed(),
+        "│".magenta()
+    );
+    println!(
+        "{}",
+        "╰──────────────────────────────────────────────────╯".magenta()
+    );
+    println!();
+}
+
+pub fn pipeline_phase(phase: crate::pipeline::PhaseName, description: &str) {
+    println!();
+    println!(
+        "{} {} {}",
+        "▶".magenta().bold(),
+        format!("[{}]", phase).magenta().bold(),
+        description,
+    );
+    println!();
+}
+
+pub fn pipeline_phase_done(phase: crate::pipeline::PhaseName) {
+    println!(
+        "{} {} {}",
+        "✓".green().bold(),
+        format!("[{}]", phase).green(),
+        "complete".dimmed(),
+    );
+}
+
+pub fn review_round(round: u32, max: u32) {
+    println!();
+    println!(
+        "{} (round {round}/{max})",
+        "Review".magenta().bold(),
+    );
+}
+
+pub fn review_passed() {
+    println!(
+        "{}",
+        "Review passed — implementation matches spec.".green().bold()
+    );
+}
+
+pub fn review_found_issues(round: u32) {
+    println!(
+        "{} round {round}. Sending implementation instance to fix...",
+        "Review found issues".yellow().bold(),
+    );
+}
+
+pub fn review_exhausted(max: u32) {
+    eprintln!(
+        "{}",
+        format!("Review still finding issues after {max} rounds.")
+            .red()
+            .bold()
+    );
+}
+
+pub fn pipeline_done(session_name: &str) {
+    println!();
+    println!(
+        "{}",
+        "╭─ pipeline complete ───────────────────────────────╮".green()
+    );
+    println!(
+        "{} {} {:<40} {}",
+        "│".green(),
+        "Session:".bold(),
+        session_name,
+        "│".green()
+    );
+    println!(
+        "{} {:<49} {}",
+        "│".green(),
+        "All phases passed. Quality verified.".bold(),
+        "│".green()
+    );
+    println!(
+        "{}",
+        "╰──────────────────────────────────────────────────╯".green()
+    );
+}
+
 pub fn done(session_name: &str) {
     println!();
     println!(

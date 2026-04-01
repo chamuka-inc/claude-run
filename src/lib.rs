@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod notify;
 pub mod output;
+pub mod pipeline;
 pub mod rate_limit;
 pub mod runner;
 pub mod slugify;
@@ -9,6 +10,7 @@ pub mod verify;
 
 use cli::Cli;
 use config::Config;
+use pipeline::{Pipeline, PipelineOutcome};
 use runner::{ClaudeRunner, TokioCommandRunner};
 use verify::VerifyOutcome;
 
@@ -32,6 +34,12 @@ pub async fn run(cli: Cli) -> i32 {
         String::new()
     };
 
+    // ── Pipeline mode ──────────────────────────────────────────
+    if cli.pipeline {
+        return run_pipeline(cli, config, session_name).await;
+    }
+
+    // ── Standard mode ──────────────────────────────────────────
     output::banner(&session_name, cli.verify.as_deref());
 
     let runner = ClaudeRunner {
@@ -71,4 +79,59 @@ pub async fn run(cli: Cli) -> i32 {
     output::done(&session_name);
     notify::notify(&format!("Task complete: {session_name}"), config.notify);
     0
+}
+
+/// Run the autonomous multi-instance pipeline.
+async fn run_pipeline(cli: Cli, config: Config, session_name: String) -> i32 {
+    let spec_path = cli
+        .spec
+        .clone()
+        .unwrap_or_else(|| format!(".claude-run/{}/spec.md", session_name));
+
+    output::pipeline_banner(&session_name, &spec_path, cli.verify.as_deref());
+
+    let pipeline = Pipeline {
+        config: config.clone(),
+        prompt: cli.prompt.clone().unwrap(),
+        spec_path,
+        verify_cmd: cli.verify.clone(),
+        base_session: session_name.clone(),
+        extra_args: cli.extra.clone(),
+        cmd: TokioCommandRunner,
+    };
+
+    match pipeline.run().await {
+        PipelineOutcome::Success => {
+            output::pipeline_done(&session_name);
+            notify::notify(
+                &format!("Pipeline complete: {session_name}"),
+                config.notify,
+            );
+            0
+        }
+        PipelineOutcome::PhaseFailed { phase, exit_code } => {
+            eprintln!("Pipeline failed at phase: {phase}");
+            notify::notify(
+                &format!("Pipeline failed at {phase}: {session_name}"),
+                config.notify,
+            );
+            exit_code
+        }
+        PipelineOutcome::VerifyExhausted => {
+            eprintln!("Pipeline failed: verification exhausted all rounds");
+            notify::notify(
+                &format!("Pipeline verify exhausted: {session_name}"),
+                config.notify,
+            );
+            1
+        }
+        PipelineOutcome::ReviewRejected { round } => {
+            eprintln!("Pipeline failed: review rejected after {round} rounds");
+            notify::notify(
+                &format!("Pipeline review rejected: {session_name}"),
+                config.notify,
+            );
+            1
+        }
+    }
 }

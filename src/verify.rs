@@ -155,6 +155,7 @@ mod tests {
             verify_max: 3,
             daily_cap_poll: std::time::Duration::from_millis(1),
             daily_cap_timeout: std::time::Duration::from_millis(10),
+            pipeline_review_rounds: 2,
         }
     }
 

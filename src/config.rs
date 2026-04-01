@@ -9,6 +9,7 @@ pub struct Config {
     pub verify_max: u32,
     pub daily_cap_poll: Duration,
     pub daily_cap_timeout: Duration,
+    pub pipeline_review_rounds: u32,
 }
 
 impl Default for Config {
@@ -21,6 +22,7 @@ impl Default for Config {
             verify_max: 5,
             daily_cap_poll: Duration::from_secs(300),
             daily_cap_timeout: Duration::from_secs(28800),
+            pipeline_review_rounds: 3,
         }
     }
 }
@@ -50,6 +52,9 @@ impl Config {
         if let Some(v) = parse_env_u64("CLAUDE_DAILY_CAP_TIMEOUT") {
             cfg.daily_cap_timeout = Duration::from_secs(v);
         }
+        if let Some(v) = parse_env_u64("CLAUDE_PIPELINE_REVIEW_ROUNDS") {
+            cfg.pipeline_review_rounds = v as u32;
+        }
 
         cfg
     }
@@ -73,6 +78,7 @@ mod tests {
         assert_eq!(cfg.verify_max, 5);
         assert_eq!(cfg.daily_cap_poll, Duration::from_secs(300));
         assert_eq!(cfg.daily_cap_timeout, Duration::from_secs(28800));
+        assert_eq!(cfg.pipeline_review_rounds, 3);
     }
 
     #[test]

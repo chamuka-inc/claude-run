@@ -17,12 +17,15 @@ pub struct Cli {
     pub name: Option<String>,
     pub resume: Option<String>,
     pub verify: Option<String>,
+    pub pipeline: bool,
+    pub spec: Option<String>,
     pub extra: Vec<String>,
 }
 
 const HELP_TEXT: &str = "\
 Usage: claude-run [OPTIONS] \"prompt\"
        claude-run --resume [session-name]
+       claude-run --pipeline [--verify CMD] \"prompt\"
 
 Run Claude Code non-interactively with automatic rate-limit retry.
 
@@ -31,25 +34,32 @@ Options:
   --resume [NAME]    Resume last session, or a named session
   --verify CMD       After Claude finishes, run CMD to verify. If it fails,
                      send Claude back in with the output to fix it.
+  --pipeline         Autonomous multi-instance pipeline: spec → implement →
+                     test → verify → review. Each phase uses an isolated
+                     Claude session for quality through separation of concerns.
+  --spec PATH        Spec file path (default: .claude-run/spec.md). With
+                     --pipeline, skip spec generation and use existing spec.
   --help, -h         Show this help
   --version, -v      Show version
 
 All other flags are passed through to claude (e.g. --max-turns 50, --model opus).
 
 Environment variables:
-  CLAUDE_MAX_RETRIES       Max rate-limit retries         (default: 10)
-  CLAUDE_RETRY_DELAY       Initial backoff in seconds     (default: 60)
-  CLAUDE_RETRY_CAP         Max backoff in seconds         (default: 300)
-  CLAUDE_NOTIFY            macOS notification on done     (default: 1)
-  CLAUDE_VERIFY_MAX        Max verify-fix cycles          (default: 5)
-  CLAUDE_DAILY_CAP_POLL    Poll interval for daily cap    (default: 300)
-  CLAUDE_DAILY_CAP_TIMEOUT Max wait for cap reset         (default: 28800)
+  CLAUDE_MAX_RETRIES              Max rate-limit retries         (default: 10)
+  CLAUDE_RETRY_DELAY              Initial backoff in seconds     (default: 60)
+  CLAUDE_RETRY_CAP                Max backoff in seconds         (default: 300)
+  CLAUDE_NOTIFY                   macOS notification on done     (default: 1)
+  CLAUDE_VERIFY_MAX               Max verify-fix cycles          (default: 5)
+  CLAUDE_DAILY_CAP_POLL           Poll interval for daily cap    (default: 300)
+  CLAUDE_DAILY_CAP_TIMEOUT        Max wait for cap reset         (default: 28800)
+  CLAUDE_PIPELINE_REVIEW_ROUNDS   Max review-fix rounds          (default: 3)
 
 Examples:
   claude-run \"implement the login feature\"
   claude-run --name login-feat \"implement the login feature\"
   claude-run --verify \"make ci\" \"implement the login feature\"
-  claude-run --max-turns 50 --model opus \"implement the login feature\"
+  claude-run --pipeline --verify \"make ci\" \"implement the login feature\"
+  claude-run --pipeline --spec ./spec.md \"implement from this spec\"
   claude-run --resume
   claude-run --resume login-feat";
 
@@ -84,6 +94,12 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> ParseResult {
             }
             "--verify" => {
                 cli.verify = args.next();
+            }
+            "--pipeline" => {
+                cli.pipeline = true;
+            }
+            "--spec" => {
+                cli.spec = args.next();
             }
             "--resume" => {
                 // --resume takes an optional non-flag argument
