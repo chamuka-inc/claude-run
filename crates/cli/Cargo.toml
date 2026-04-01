@@ -1,0 +1,21 @@
+[package]
+name = "claude-run"
+version.workspace = true
+edition.workspace = true
+description = "Non-interactive Claude Code runner with rate-limit retry, verification loops, adversarial review, and YAML pipelines"
+
+[[bin]]
+name = "claude-run"
+path = "src/main.rs"
+
+[dependencies]
+claude-run-lib = { workspace = true }
+claude-run-retry = { path = "../retry" }
+claude-run-verify = { path = "../verify" }
+claude-run-review = { path = "../review" }
+claude-run-pipeline = { path = "../pipeline" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"

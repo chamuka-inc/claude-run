@@ -553,11 +553,15 @@ impl<R: CommandRunner + Clone + 'static> PipelineRunner<R> {
         match verifier {
             Verifier::Shell { command } => {
                 format!(
-                    "The verification command `{command}` failed (exit code 0). \
+                    "The verification command `{command}` failed. \
                      Fix the issues and try again. Here is the output:\n\n```\n{}\n```",
                     feedback.summary
                 )
             }
+            Verifier::Claude {
+                verdict_parser: VerdictParser::ScoreThreshold { threshold },
+                ..
+            } => crate::prompts::build_av_fix_prompt_with_threshold(feedback, *threshold),
             Verifier::Claude { .. } => crate::prompts::build_av_fix_prompt(feedback),
             Verifier::Chain(verifiers) => {
                 // Find which verifier failed and use its fix prompt style

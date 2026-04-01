@@ -1,0 +1,9 @@
+[package]
+name = "claude-run-pipeline"
+version.workspace = true
+edition.workspace = true
+description = "YAML pipeline orchestrator subcommand for claude-run"
+
+[dependencies]
+claude-run-lib = { workspace = true }
+tokio = { workspace = true }

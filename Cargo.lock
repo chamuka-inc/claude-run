@@ -83,11 +83,55 @@ name = "claude-run"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "claude-run-lib",
+ "claude-run-pipeline",
+ "claude-run-retry",
+ "claude-run-review",
+ "claude-run-verify",
+ "predicates",
+ "tokio",
+]
+
+[[package]]
+name = "claude-run-lib"
+version = "0.1.0"
+dependencies = [
  "async-trait",
  "colored",
- "predicates",
  "serde",
  "serde_yaml",
+ "tokio",
+]
+
+[[package]]
+name = "claude-run-pipeline"
+version = "0.1.0"
+dependencies = [
+ "claude-run-lib",
+ "tokio",
+]
+
+[[package]]
+name = "claude-run-retry"
+version = "0.1.0"
+dependencies = [
+ "claude-run-lib",
+ "tokio",
+]
+
+[[package]]
+name = "claude-run-review"
+version = "0.1.0"
+dependencies = [
+ "claude-run-lib",
+ "tokio",
+]
+
+[[package]]
+name = "claude-run-verify"
+version = "0.1.0"
+dependencies = [
+ "claude-run-lib",
  "tokio",
 ]
 

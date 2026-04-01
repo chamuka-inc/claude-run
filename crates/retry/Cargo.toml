@@ -1,0 +1,9 @@
+[package]
+name = "claude-run-retry"
+version.workspace = true
+edition.workspace = true
+description = "Rate-limit retry subcommand for claude-run"
+
+[dependencies]
+claude-run-lib = { workspace = true }
+tokio = { workspace = true }

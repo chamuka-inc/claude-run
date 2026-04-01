@@ -1,0 +1,12 @@
+[package]
+name = "claude-run-lib"
+version.workspace = true
+edition.workspace = true
+description = "Shared library for claude-run: config, output, runner, pipeline engine"
+
+[dependencies]
+tokio = { workspace = true }
+colored = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
