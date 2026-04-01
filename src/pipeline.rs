@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::output;
 use crate::runner::{ClaudeRunner, CommandRunner};
-use crate::verify;
+use crate::verify::{self, ShellVerifier, SpecReviewVerifier, Verifier, VerifyOutcome};
 
 /// Outcome of a full pipeline run.
 #[derive(Debug)]
@@ -11,9 +11,8 @@ pub enum PipelineOutcome {
         phase: PhaseName,
         exit_code: i32,
     },
-    VerifyExhausted,
-    ReviewRejected {
-        round: u32,
+    VerifierExhausted {
+        verifier_name: String,
     },
 }
 
@@ -23,8 +22,6 @@ pub enum PhaseName {
     Spec,
     Implement,
     Test,
-    Verify,
-    Review,
 }
 
 impl std::fmt::Display for PhaseName {
@@ -33,14 +30,19 @@ impl std::fmt::Display for PhaseName {
             Self::Spec => write!(f, "spec"),
             Self::Implement => write!(f, "implement"),
             Self::Test => write!(f, "test"),
-            Self::Verify => write!(f, "verify"),
-            Self::Review => write!(f, "review"),
         }
     }
 }
 
 /// The pipeline orchestrator. Runs multiple isolated Claude instances
-/// in sequence to ensure quality through separation of concerns.
+/// in sequence, then gates quality through verifiers.
+///
+/// Architecture:
+///   Phases produce work:  spec → implement → test
+///   Verifiers gate quality:  [shell verify] → [spec review]
+///
+/// Every verifier follows the same loop: check → fail? → fix → recheck.
+/// The only difference is what "check" means (shell command vs Claude review).
 pub struct Pipeline<R: CommandRunner> {
     pub config: Config,
     pub prompt: String,
@@ -62,7 +64,7 @@ impl<R: CommandRunner + Clone> Pipeline<R> {
         }
     }
 
-    /// Run the full pipeline: spec → implement → test → verify → review.
+    /// Run the full pipeline: phases produce work, verifiers gate quality.
     pub async fn run(&self) -> PipelineOutcome {
         // ── Phase 1: Spec ──────────────────────────────────────────
         output::pipeline_phase(PhaseName::Spec, "Generating specification");
@@ -141,152 +143,58 @@ impl<R: CommandRunner + Clone> Pipeline<R> {
         }
         output::pipeline_phase_done(PhaseName::Test);
 
-        // ── Phase 4: Verify (deterministic) ────────────────────────
-        if let Some(verify_cmd) = &self.verify_cmd {
-            output::pipeline_phase(PhaseName::Verify, "Running verification loop");
+        // ── Verifiers gate quality ─────────────────────────────────
+        // Each verifier follows the same loop: check → fail → fix → recheck.
+        // The impl_runner is the fixer for all verifiers.
 
-            // Use the impl runner for fixes (it has the implementation context)
-            match verify::run_verify_loop(&impl_runner, verify_cmd).await {
-                verify::VerifyOutcome::Passed { .. } => {
-                    output::pipeline_phase_done(PhaseName::Verify);
-                }
-                verify::VerifyOutcome::ExhaustedRounds => {
-                    return PipelineOutcome::VerifyExhausted;
-                }
-                verify::VerifyOutcome::ClaudeFailed { exit_code, .. } => {
-                    return PipelineOutcome::PhaseFailed {
-                        phase: PhaseName::Verify,
-                        exit_code,
-                    };
-                }
+        // Verifier 1: Shell command (deterministic — tests pass/fail)
+        if let Some(verify_cmd) = &self.verify_cmd {
+            let shell_verifier = ShellVerifier::new(verify_cmd, self.cmd.clone());
+            let outcome = verify::run_verify_loop(
+                &shell_verifier,
+                &impl_runner,
+                self.config.verify_max,
+            )
+            .await;
+            if let Some(failure) = check_outcome(outcome, shell_verifier.name()) {
+                return failure;
             }
         }
 
-        // ── Phase 5: Review (independent instance) ─────────────────
-        output::pipeline_phase(PhaseName::Review, "Independent review against spec");
-
-        let review_outcome = self.run_review(&impl_runner).await;
-        match review_outcome {
-            ReviewOutcome::Approved => {
-                output::pipeline_phase_done(PhaseName::Review);
-            }
-            ReviewOutcome::Rejected { round } => {
-                return PipelineOutcome::ReviewRejected { round };
-            }
-            ReviewOutcome::Failed { exit_code } => {
-                return PipelineOutcome::PhaseFailed {
-                    phase: PhaseName::Review,
-                    exit_code,
-                };
-            }
+        // Verifier 2: Spec review (independent Claude instance)
+        let review_verifier = SpecReviewVerifier::new(
+            &self.spec_path,
+            &self.base_session,
+            self.config.clone(),
+            self.extra_args.clone(),
+            self.cmd.clone(),
+        );
+        let outcome = verify::run_verify_loop(
+            &review_verifier,
+            &impl_runner,
+            self.config.pipeline_review_rounds,
+        )
+        .await;
+        if let Some(failure) = check_outcome(outcome, review_verifier.name()) {
+            return failure;
         }
 
         PipelineOutcome::Success
     }
-
-    /// Run the review phase: an independent instance checks implementation
-    /// against spec. If it finds issues, the impl instance fixes them,
-    /// then review runs again.
-    async fn run_review(&self, impl_runner: &ClaudeRunner<R>) -> ReviewOutcome {
-        let max_rounds = self.config.pipeline_review_rounds;
-
-        for round in 1..=max_rounds {
-            output::review_round(round, max_rounds);
-
-            let review_prompt = format!(
-                "You are an independent code reviewer. Read the specification at \
-                 `{spec_path}` and review the current implementation against it.\n\
-                 \n\
-                 For each requirement in the spec:\n\
-                 1. Check if it is fully implemented\n\
-                 2. Check if the acceptance criteria are met\n\
-                 3. Check if edge cases are handled\n\
-                 \n\
-                 If EVERYTHING in the spec is correctly implemented, output exactly:\n\
-                 PIPELINE_VERDICT: PASS\n\
-                 \n\
-                 If there are ANY issues, output exactly:\n\
-                 PIPELINE_VERDICT: FAIL\n\
-                 followed by a numbered list of specific issues that need fixing.\n\
-                 \n\
-                 Be thorough but fair. Only flag genuine spec violations, not style preferences.",
-                spec_path = self.spec_path,
-            );
-
-            let review_runner = ClaudeRunner {
-                config: self.config.clone(),
-                // Each review round gets its own session to avoid context contamination
-                session_name: format!("{}-review-r{}", self.base_session, round),
-                extra_args: self.extra_args.clone(),
-                cmd: self.cmd.clone(),
-            };
-
-            // Run review with output capture
-            let review_args = review_runner.build_args_with_output_format(&review_prompt, false);
-            let result = match review_runner.cmd.run_claude(&review_args).await {
-                Ok(r) => r,
-                Err(_) => {
-                    return ReviewOutcome::Failed { exit_code: 1 };
-                }
-            };
-
-            if result.exit_code != 0 {
-                return ReviewOutcome::Failed {
-                    exit_code: result.exit_code,
-                };
-            }
-
-            // Check verdict in stdout (when using --output-format json we get stdout)
-            // Fall back to checking if review passed based on output
-            let combined = format!("{}{}", result.stdout, result.stderr);
-            if combined.contains("PIPELINE_VERDICT: PASS") {
-                output::review_passed();
-                return ReviewOutcome::Approved;
-            }
-
-            // Review found issues — send them to the impl instance to fix
-            output::review_found_issues(round);
-
-            let fix_prompt = format!(
-                "An independent reviewer found issues with your implementation. \
-                 Fix ALL of the following issues:\n\n{combined}\n\n\
-                 Refer back to the spec at `{spec_path}` to ensure compliance.",
-                spec_path = self.spec_path,
-            );
-
-            if let Err(e) = impl_runner.run_with_retry(&fix_prompt, true).await {
-                return ReviewOutcome::Failed {
-                    exit_code: e.exit_code(),
-                };
-            }
-
-            // If there's a verify command, re-verify after fixes
-            if let Some(verify_cmd) = &self.verify_cmd {
-                match verify::run_verify_loop(impl_runner, verify_cmd).await {
-                    verify::VerifyOutcome::Passed { .. } => {}
-                    verify::VerifyOutcome::ExhaustedRounds => {
-                        return ReviewOutcome::Failed { exit_code: 1 };
-                    }
-                    verify::VerifyOutcome::ClaudeFailed { exit_code, .. } => {
-                        return ReviewOutcome::Failed { exit_code };
-                    }
-                }
-            }
-        }
-
-        // Exhausted review rounds
-        output::review_exhausted(max_rounds);
-        ReviewOutcome::Rejected {
-            round: max_rounds,
-        }
-    }
 }
 
-#[derive(Debug)]
-enum ReviewOutcome {
-    Approved,
-    Rejected { round: u32 },
-    Failed { exit_code: i32 },
+/// Convert a VerifyOutcome into a PipelineOutcome failure, or None if passed.
+fn check_outcome(outcome: VerifyOutcome, name: &str) -> Option<PipelineOutcome> {
+    match outcome {
+        VerifyOutcome::Passed { .. } => None,
+        VerifyOutcome::ExhaustedRounds => Some(PipelineOutcome::VerifierExhausted {
+            verifier_name: name.to_string(),
+        }),
+        VerifyOutcome::FixerFailed { exit_code, .. } => Some(PipelineOutcome::PhaseFailed {
+            phase: PhaseName::Implement, // fixer is always the impl runner
+            exit_code,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -305,8 +213,6 @@ mod tests {
         claude_results: std::sync::Mutex<Vec<RunResult>>,
         shell_results: std::sync::Mutex<Vec<RunResult>>,
         claude_calls: AtomicU32,
-        shell_calls: AtomicU32,
-        claude_prompts: std::sync::Mutex<Vec<String>>,
     }
 
     impl MockPipelineRunner {
@@ -316,8 +222,6 @@ mod tests {
                     claude_results: std::sync::Mutex::new(claude),
                     shell_results: std::sync::Mutex::new(shell),
                     claude_calls: AtomicU32::new(0),
-                    shell_calls: AtomicU32::new(0),
-                    claude_prompts: std::sync::Mutex::new(Vec::new()),
                 }),
             }
         }
@@ -325,27 +229,12 @@ mod tests {
         fn claude_calls(&self) -> u32 {
             self.inner.claude_calls.load(Ordering::SeqCst)
         }
-
-        fn prompts(&self) -> Vec<String> {
-            self.inner.claude_prompts.lock().unwrap().clone()
-        }
     }
 
     #[async_trait::async_trait]
     impl CommandRunner for MockPipelineRunner {
-        async fn run_claude(&self, args: &[String]) -> std::io::Result<RunResult> {
+        async fn run_claude(&self, _args: &[String]) -> std::io::Result<RunResult> {
             self.inner.claude_calls.fetch_add(1, Ordering::SeqCst);
-            // Capture the prompt (first non-flag arg after -p)
-            if let Some(prompt_idx) = args.iter().position(|a| a == "-p") {
-                // The prompt is typically after --permission-mode bypassPermissions
-                if let Some(prompt) = args.get(prompt_idx + 3) {
-                    self.inner
-                        .claude_prompts
-                        .lock()
-                        .unwrap()
-                        .push(prompt.clone());
-                }
-            }
             let mut results = self.inner.claude_results.lock().unwrap();
             if results.is_empty() {
                 Ok(RunResult {
@@ -359,7 +248,6 @@ mod tests {
         }
 
         async fn run_shell(&self, _cmd: &str) -> std::io::Result<RunResult> {
-            self.inner.shell_calls.fetch_add(1, Ordering::SeqCst);
             let mut results = self.inner.shell_results.lock().unwrap();
             if results.is_empty() {
                 Ok(RunResult {
@@ -388,33 +276,13 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_success_no_verify() {
-        // Spec, Impl, Test all succeed. Review passes on first try.
+        // Spec + Impl + Test succeed, Review passes
         let mock = MockPipelineRunner::new(
             vec![
-                // Phase 1: Spec
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Phase 2: Implement
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Phase 3: Test
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Phase 5: Review — passes
-                RunResult {
-                    exit_code: 0,
-                    stdout: "PIPELINE_VERDICT: PASS".into(),
-                    stderr: String::new(),
-                },
+                ok_result(),          // Spec
+                ok_result(),          // Implement
+                ok_result(),          // Test
+                review_pass_result(), // Review: PASS
             ],
             vec![],
         );
@@ -431,41 +299,20 @@ mod tests {
 
         let outcome = pipeline.run().await;
         assert!(matches!(outcome, PipelineOutcome::Success));
-        // Spec + Impl + Test + Review = 4 claude calls
-        assert_eq!(mock.claude_calls(), 4);
+        assert_eq!(mock.claude_calls(), 4); // Spec + Impl + Test + Review
     }
 
     #[tokio::test]
     async fn pipeline_success_with_verify() {
         let mock = MockPipelineRunner::new(
             vec![
-                // Spec
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Implement
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Test write
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Review passes
-                RunResult {
-                    exit_code: 0,
-                    stdout: "PIPELINE_VERDICT: PASS".into(),
-                    stderr: String::new(),
-                },
+                ok_result(),          // Spec
+                ok_result(),          // Implement
+                ok_result(),          // Test
+                review_pass_result(), // Review: PASS
             ],
             vec![
-                // Verify passes first try
+                // Shell verify passes
                 RunResult {
                     exit_code: 0,
                     stdout: "all tests pass".into(),
@@ -476,16 +323,15 @@ mod tests {
 
         let pipeline = Pipeline {
             config: test_config(),
-            prompt: "add login feature".into(),
-            spec_path: ".claude-run/spec.md".into(),
+            prompt: "add login".into(),
+            spec_path: "spec.md".into(),
             verify_cmd: Some("make test".into()),
-            base_session: "test-pipeline".into(),
+            base_session: "test".into(),
             extra_args: vec![],
             cmd: mock,
         };
 
-        let outcome = pipeline.run().await;
-        assert!(matches!(outcome, PipelineOutcome::Success));
+        assert!(matches!(pipeline.run().await, PipelineOutcome::Success));
     }
 
     #[tokio::test]
@@ -502,15 +348,14 @@ mod tests {
         let pipeline = Pipeline {
             config: test_config(),
             prompt: "add login".into(),
-            spec_path: ".claude-run/spec.md".into(),
+            spec_path: "spec.md".into(),
             verify_cmd: None,
             base_session: "test".into(),
             extra_args: vec![],
             cmd: mock,
         };
 
-        let outcome = pipeline.run().await;
-        match outcome {
+        match pipeline.run().await {
             PipelineOutcome::PhaseFailed { phase, exit_code } => {
                 assert_eq!(phase, PhaseName::Spec);
                 assert_eq!(exit_code, 2);
@@ -523,42 +368,12 @@ mod tests {
     async fn pipeline_review_rejects_then_approves() {
         let mock = MockPipelineRunner::new(
             vec![
-                // Spec
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Implement
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Test
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Review round 1: FAIL
-                RunResult {
-                    exit_code: 0,
-                    stdout: "PIPELINE_VERDICT: FAIL\n1. Missing input validation".into(),
-                    stderr: String::new(),
-                },
-                // Impl fix (resume)
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Review round 2: PASS
-                RunResult {
-                    exit_code: 0,
-                    stdout: "PIPELINE_VERDICT: PASS".into(),
-                    stderr: String::new(),
-                },
+                ok_result(),          // Spec
+                ok_result(),          // Implement
+                ok_result(),          // Test
+                review_fail_result(), // Review round 1: FAIL
+                ok_result(),          // Fixer
+                review_pass_result(), // Review round 2: PASS
             ],
             vec![],
         );
@@ -566,45 +381,92 @@ mod tests {
         let pipeline = Pipeline {
             config: test_config(),
             prompt: "add login".into(),
-            spec_path: ".claude-run/spec.md".into(),
+            spec_path: "spec.md".into(),
             verify_cmd: None,
             base_session: "test".into(),
             extra_args: vec![],
             cmd: mock,
         };
 
-        let outcome = pipeline.run().await;
-        assert!(matches!(outcome, PipelineOutcome::Success));
+        assert!(matches!(pipeline.run().await, PipelineOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn pipeline_shell_verify_fails_then_passes() {
+        let mock = MockPipelineRunner::new(
+            vec![
+                ok_result(),          // Spec
+                ok_result(),          // Implement
+                ok_result(),          // Test
+                ok_result(),          // Fixer (after shell fail)
+                review_pass_result(), // Review: PASS
+            ],
+            vec![
+                // Shell round 1: fail
+                RunResult {
+                    exit_code: 1,
+                    stdout: "test failed".into(),
+                    stderr: String::new(),
+                },
+                // Shell round 2: pass
+                RunResult {
+                    exit_code: 0,
+                    stdout: "ok".into(),
+                    stderr: String::new(),
+                },
+            ],
+        );
+
+        let pipeline = Pipeline {
+            config: test_config(),
+            prompt: "add login".into(),
+            spec_path: "spec.md".into(),
+            verify_cmd: Some("make test".into()),
+            base_session: "test".into(),
+            extra_args: vec![],
+            cmd: mock,
+        };
+
+        assert!(matches!(pipeline.run().await, PipelineOutcome::Success));
     }
 
     #[tokio::test]
     async fn pipeline_sessions_are_isolated() {
         let mock = MockPipelineRunner::new(
+            vec![ok_result(), ok_result(), ok_result(), review_pass_result()],
+            vec![],
+        );
+
+        let pipeline = Pipeline {
+            config: test_config(),
+            prompt: "add login".into(),
+            spec_path: "spec.md".into(),
+            verify_cmd: None,
+            base_session: "my-task".into(),
+            extra_args: vec![],
+            cmd: mock,
+        };
+
+        pipeline.run().await;
+
+        assert_eq!(pipeline.runner_for(PhaseName::Spec).session_name, "my-task-spec");
+        assert_eq!(pipeline.runner_for(PhaseName::Implement).session_name, "my-task-implement");
+        assert_eq!(pipeline.runner_for(PhaseName::Test).session_name, "my-task-test");
+    }
+
+    #[tokio::test]
+    async fn pipeline_verifier_exhausted_reports_name() {
+        let mock = MockPipelineRunner::new(
             vec![
-                // Spec
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Implement
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Test
-                RunResult {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-                // Review
-                RunResult {
-                    exit_code: 0,
-                    stdout: "PIPELINE_VERDICT: PASS".into(),
-                    stderr: String::new(),
-                },
+                ok_result(), // Spec
+                ok_result(), // Implement
+                ok_result(), // Test
+                // Review keeps failing
+                review_fail_result(),
+                ok_result(), // Fixer
+                review_fail_result(),
+                ok_result(), // Fixer
+                review_fail_result(), // Final check
             ],
             vec![],
         );
@@ -612,24 +474,44 @@ mod tests {
         let pipeline = Pipeline {
             config: test_config(),
             prompt: "add login".into(),
-            spec_path: ".claude-run/spec.md".into(),
+            spec_path: "spec.md".into(),
             verify_cmd: None,
-            base_session: "my-task".into(),
+            base_session: "test".into(),
             extra_args: vec![],
             cmd: mock,
         };
 
-        let outcome = pipeline.run().await;
-        assert!(matches!(outcome, PipelineOutcome::Success));
+        match pipeline.run().await {
+            PipelineOutcome::VerifierExhausted { verifier_name } => {
+                assert_eq!(verifier_name, "spec review");
+            }
+            other => panic!("expected VerifierExhausted, got {other:?}"),
+        }
+    }
 
-        // Verify session names are isolated per phase
-        let spec_runner = pipeline.runner_for(PhaseName::Spec);
-        assert_eq!(spec_runner.session_name, "my-task-spec");
+    // ── Test helpers ───────────────────────────────────────────
 
-        let impl_runner = pipeline.runner_for(PhaseName::Implement);
-        assert_eq!(impl_runner.session_name, "my-task-implement");
+    fn ok_result() -> RunResult {
+        RunResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
 
-        let test_runner = pipeline.runner_for(PhaseName::Test);
-        assert_eq!(test_runner.session_name, "my-task-test");
+    fn review_pass_result() -> RunResult {
+        RunResult {
+            exit_code: 0,
+            stdout: "PIPELINE_VERDICT: PASS".into(),
+            stderr: String::new(),
+        }
+    }
+
+    fn review_fail_result() -> RunResult {
+        RunResult {
+            exit_code: 0,
+            stdout: "PIPELINE_VERDICT: FAIL\n1. Missing validation".into(),
+            stderr: String::new(),
+        }
     }
 }

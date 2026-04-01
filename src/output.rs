@@ -54,34 +54,40 @@ pub fn resuming(session_name: &str) {
     println!();
 }
 
-pub fn verify_round(round: u32, max: u32, cmd: &str) {
+/// Unified verifier output — used by all verifiers (shell, spec review, etc.)
+pub fn verifier_round(name: &str, round: u32, max: u32) {
     println!();
     println!(
         "{} (round {round}/{max}): {}",
         "Verifying".magenta().bold(),
-        cmd.dimmed()
+        name.dimmed()
     );
     println!();
 }
 
-pub fn verify_passed() {
-    println!();
-    println!("{}", "Verification passed.".green().bold());
-}
-
-pub fn verify_failed(exit_code: i32) {
+pub fn verifier_passed(name: &str) {
     println!();
     println!(
-        "{} (exit {exit_code}). Sending Claude back in...",
-        "Verification failed".yellow().bold(),
+        "{} {}",
+        "Passed:".green().bold(),
+        name,
     );
 }
 
-pub fn verify_exhausted(max: u32) {
+pub fn verifier_failed(name: &str) {
+    println!();
+    println!(
+        "{} `{}`. Sending fixer back in...",
+        "Failed:".yellow().bold(),
+        name,
+    );
+}
+
+pub fn verifier_exhausted(name: &str, max: u32) {
     println!();
     eprintln!(
         "{}",
-        format!("Verification still failing after {max} rounds.")
+        format!("`{name}` still failing after {max} rounds.")
             .red()
             .bold()
     );
@@ -180,37 +186,6 @@ pub fn pipeline_phase_done(phase: crate::pipeline::PhaseName) {
         "✓".green().bold(),
         format!("[{}]", phase).green(),
         "complete".dimmed(),
-    );
-}
-
-pub fn review_round(round: u32, max: u32) {
-    println!();
-    println!(
-        "{} (round {round}/{max})",
-        "Review".magenta().bold(),
-    );
-}
-
-pub fn review_passed() {
-    println!(
-        "{}",
-        "Review passed — implementation matches spec.".green().bold()
-    );
-}
-
-pub fn review_found_issues(round: u32) {
-    println!(
-        "{} round {round}. Sending implementation instance to fix...",
-        "Review found issues".yellow().bold(),
-    );
-}
-
-pub fn review_exhausted(max: u32) {
-    eprintln!(
-        "{}",
-        format!("Review still finding issues after {max} rounds.")
-            .red()
-            .bold()
     );
 }
 

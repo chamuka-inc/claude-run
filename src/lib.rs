@@ -64,12 +64,12 @@ pub async fn run(cli: Cli) -> i32 {
         return e.exit_code();
     }
 
-    // Verify loop
+    // Verify loop (uses the same Verifier trait as pipeline)
     if let Some(verify_cmd) = &cli.verify {
-        match verify::run_verify_loop(&runner, verify_cmd).await {
+        match verify::run_shell_verify_loop(&runner, verify_cmd).await {
             VerifyOutcome::Passed { .. } => {}
             VerifyOutcome::ExhaustedRounds => return 1,
-            VerifyOutcome::ClaudeFailed { exit_code, .. } => {
+            VerifyOutcome::FixerFailed { exit_code, .. } => {
                 notify::notify(&format!("Fix failed: {session_name}"), config.notify);
                 return exit_code;
             }
@@ -117,18 +117,10 @@ async fn run_pipeline(cli: Cli, config: Config, session_name: String) -> i32 {
             );
             exit_code
         }
-        PipelineOutcome::VerifyExhausted => {
-            eprintln!("Pipeline failed: verification exhausted all rounds");
+        PipelineOutcome::VerifierExhausted { verifier_name } => {
+            eprintln!("Pipeline failed: verifier `{verifier_name}` exhausted all rounds");
             notify::notify(
-                &format!("Pipeline verify exhausted: {session_name}"),
-                config.notify,
-            );
-            1
-        }
-        PipelineOutcome::ReviewRejected { round } => {
-            eprintln!("Pipeline failed: review rejected after {round} rounds");
-            notify::notify(
-                &format!("Pipeline review rejected: {session_name}"),
+                &format!("Pipeline verifier exhausted ({verifier_name}): {session_name}"),
                 config.notify,
             );
             1
