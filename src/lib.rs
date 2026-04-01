@@ -115,7 +115,7 @@ fn build_pipeline(cli: &Cli, config: &Config) -> Pipeline {
     let steps = match verifier {
         Some(v) => {
             let max_rounds = if cli.av {
-                cli.av_rounds.unwrap_or(config.av_rounds())
+                cli.av_rounds.unwrap_or(config.av_rounds)
             } else {
                 config.verify_max
             };

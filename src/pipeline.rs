@@ -4,7 +4,7 @@ use crate::output;
 use crate::rate_limit::{is_rate_limited, Backoff};
 use crate::runner::{CommandRunner, RunError};
 use crate::stage::{Stage, StageResult};
-use crate::verifier::{Verifier, VerifyFeedback};
+use crate::verifier::{VerdictParser, Verifier, VerifyFeedback};
 
 // ─── Pipeline definition ───────────────────────────────────────────
 
@@ -351,7 +351,13 @@ impl<R: CommandRunner> PipelineRunner<R> {
             };
         }
 
+        let is_scored = has_score_verifier(verifier);
+
         for round in 1..=max_rounds {
+            if is_scored {
+                output::av_round(round, max_rounds);
+            }
+
             // Run verifier
             let feedback = match self.run_verifier(verifier).await {
                 Ok(fb) => fb,
@@ -363,8 +369,23 @@ impl<R: CommandRunner> PipelineRunner<R> {
                 }
             };
 
+            // Display score feedback if available
+            if let Some(score) = feedback.score {
+                output::av_score(
+                    score,
+                    0, // threshold not available here, shown in summary
+                    feedback.missing.len(),
+                    feedback.partial.len(),
+                    feedback.incorrect.len(),
+                );
+            }
+
             if feedback.passed {
-                output::verify_passed();
+                if is_scored {
+                    output::av_passed(feedback.score.unwrap_or(100));
+                } else {
+                    output::verify_passed();
+                }
                 return VerifyOutcome::Passed {
                     round,
                     score: feedback.score,
@@ -377,7 +398,13 @@ impl<R: CommandRunner> PipelineRunner<R> {
 
             // Build fix prompt and resume worker
             let fix_prompt = self.build_fix_prompt(verifier, &feedback);
-            output::verify_failed(0);
+            let total_issues =
+                feedback.missing.len() + feedback.partial.len() + feedback.incorrect.len();
+            if is_scored && total_issues > 0 {
+                output::av_fixing(total_issues);
+            } else {
+                output::verify_failed(0);
+            }
 
             if let Err(e) = self.run_claude_with_retry(&fix_prompt, true).await {
                 return VerifyOutcome::StageFailed {
@@ -390,7 +417,11 @@ impl<R: CommandRunner> PipelineRunner<R> {
         // One final verify after the last fix attempt
         if let Ok(feedback) = self.run_verifier(verifier).await {
             if feedback.passed {
-                output::verify_passed();
+                if is_scored {
+                    output::av_passed(feedback.score.unwrap_or(100));
+                } else {
+                    output::verify_passed();
+                }
                 return VerifyOutcome::Passed {
                     round: max_rounds,
                     score: feedback.score,
@@ -469,6 +500,18 @@ impl<R: CommandRunner> PipelineRunner<R> {
                 }
             }
         }
+    }
+}
+
+/// Check if a verifier involves score-based evaluation (for output formatting).
+fn has_score_verifier(verifier: &Verifier) -> bool {
+    match verifier {
+        Verifier::Claude {
+            verdict_parser: VerdictParser::ScoreThreshold { .. },
+            ..
+        } => true,
+        Verifier::Chain(verifiers) => verifiers.iter().any(has_score_verifier),
+        _ => false,
     }
 }
 

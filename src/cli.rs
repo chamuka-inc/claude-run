@@ -12,7 +12,6 @@
 ///   --av-threshold N         Minimum score to pass (default: 95)
 ///   --av-rounds N            Max review-fix rounds (default: 3)
 ///   --av-model MODEL         Model for reviewer
-///   --av-prompt FILE         Custom reviewer prompt template
 ///   --pipeline FILE          Load multi-stage pipeline from YAML
 ///   --help, -h               Show help
 ///   --version, -v            Show version
@@ -30,7 +29,6 @@ pub struct Cli {
     pub av_threshold: Option<u32>,
     pub av_rounds: Option<u32>,
     pub av_model: Option<String>,
-    pub av_prompt: Option<String>,
     pub extra: Vec<String>,
 }
 
@@ -58,7 +56,6 @@ Adversarial Verification:
   --av-threshold N   Minimum score to pass (default: 95)
   --av-rounds N      Max review-fix rounds (default: 3)
   --av-model MODEL   Model for the reviewer (default: same as worker)
-  --av-prompt FILE   Custom reviewer prompt template
 
 All other flags are passed through to claude (e.g. --max-turns 50, --model opus).
 
@@ -139,9 +136,6 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> ParseResult {
             }
             "--av-model" => {
                 cli.av_model = args.next();
-            }
-            "--av-prompt" => {
-                cli.av_prompt = args.next();
             }
             "--pipeline" => {
                 cli.pipeline = args.next();
@@ -381,8 +375,6 @@ mod tests {
             "5",
             "--av-model",
             "opus",
-            "--av-prompt",
-            "custom.txt",
             "--verify",
             "make ci",
             "implement the spec",
@@ -392,7 +384,6 @@ mod tests {
         assert_eq!(cli.av_threshold, Some(90));
         assert_eq!(cli.av_rounds, Some(5));
         assert_eq!(cli.av_model.as_deref(), Some("opus"));
-        assert_eq!(cli.av_prompt.as_deref(), Some("custom.txt"));
         assert_eq!(cli.verify.as_deref(), Some("make ci"));
         assert_eq!(cli.prompt.as_deref(), Some("implement the spec"));
     }

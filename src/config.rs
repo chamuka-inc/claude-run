@@ -70,11 +70,6 @@ impl Config {
 
         cfg
     }
-
-    /// Get the configured AV rounds (for use from lib.rs pipeline builder).
-    pub fn av_rounds(&self) -> u32 {
-        self.av_rounds
-    }
 }
 
 fn parse_env_u64(key: &str) -> Option<u64> {

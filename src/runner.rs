@@ -112,21 +112,24 @@ impl CommandRunner for TokioCommandRunner {
     }
 
     async fn run_shell(&self, cmd: &str) -> std::io::Result<RunResult> {
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .output()
-            .await?;
+        // Run once, capture output, and tee to terminal
+        let output = Command::new("sh").arg("-c").arg(cmd).output().await?;
 
-        // Also capture for the fix prompt (re-run capturing output)
-        let captured = Command::new("sh").arg("-c").arg(cmd).output().await?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Stream captured output to terminal
+        if !stdout.is_empty() {
+            print!("{stdout}");
+        }
+        if !stderr.is_empty() {
+            eprint!("{stderr}");
+        }
 
         Ok(RunResult {
             exit_code: output.status.code().unwrap_or(1),
-            stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
+            stdout: stdout.into_owned(),
+            stderr: stderr.into_owned(),
         })
     }
 }
