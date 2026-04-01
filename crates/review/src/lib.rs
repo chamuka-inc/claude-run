@@ -1,6 +1,6 @@
 use claude_run_lib::config::Config;
 use claude_run_lib::output;
-use claude_run_lib::pipeline::{Pipeline, PipelineRunner, PipelineStep};
+use claude_run_lib::pipeline::PipelineRunner;
 use claude_run_lib::prompts;
 use claude_run_lib::runner::TokioCommandRunner;
 use claude_run_lib::stage::Stage;
@@ -60,10 +60,6 @@ pub async fn run(args: Vec<String>) -> i32 {
     let review_prompt = prompts::build_review_prompt(original, Some(&spec_file));
     let reviewer = Stage::claude_reviewer(review_prompt, "-review", model);
 
-    let pipeline = Pipeline {
-        steps: vec![PipelineStep::Run(reviewer)],
-    };
-
     let runner = PipelineRunner {
         config,
         base_session: "review".into(),
@@ -71,21 +67,8 @@ pub async fn run(args: Vec<String>) -> i32 {
         cmd: TokioCommandRunner,
     };
 
-    // Run reviewer and capture output
-    let result = match runner
-        .run_stage(
-            &pipeline
-                .steps
-                .first()
-                .map(|s| match s {
-                    PipelineStep::Run(stage) => stage.clone(),
-                    _ => unreachable!(),
-                })
-                .unwrap(),
-            false,
-        )
-        .await
-    {
+    // Run reviewer (capture_output is true on claude_reviewer stages)
+    let result = match runner.run_stage(&reviewer, false).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Reviewer failed: {e}");
@@ -93,7 +76,7 @@ pub async fn run(args: Vec<String>) -> i32 {
         }
     };
 
-    // Parse verdict
+    // Parse verdict from captured stdout
     let verdict = verdict::parse_verdict(&result.stdout);
     match verdict {
         verdict::ReviewVerdict::Scored(score) => {

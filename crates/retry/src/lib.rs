@@ -1,4 +1,5 @@
 use claude_run_lib::config::Config;
+use claude_run_lib::notify;
 use claude_run_lib::output;
 use claude_run_lib::pipeline::{Pipeline, PipelineOutcome, PipelineRunner, PipelineStep};
 use claude_run_lib::runner::TokioCommandRunner;
@@ -100,7 +101,7 @@ pub async fn run(args: Vec<String>) -> i32 {
     };
 
     let runner = PipelineRunner {
-        config,
+        config: config.clone(),
         base_session: session_name.clone(),
         extra_args: extra,
         cmd: TokioCommandRunner,
@@ -108,8 +109,18 @@ pub async fn run(args: Vec<String>) -> i32 {
 
     let outcome = runner.run(&pipeline).await;
 
-    if matches!(&outcome, PipelineOutcome::Success) {
-        output::done(&session_name);
+    match &outcome {
+        PipelineOutcome::Success => {
+            output::done(&session_name);
+            notify::notify(&format!("Task complete: {session_name}"), config.notify);
+        }
+        PipelineOutcome::StageFailed { .. } => {
+            notify::notify(
+                &format!("Failed (exit {}): {session_name}", outcome.exit_code()),
+                config.notify,
+            );
+        }
+        _ => {}
     }
 
     outcome.exit_code()

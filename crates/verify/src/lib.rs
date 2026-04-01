@@ -102,7 +102,7 @@ pub async fn run(args: Vec<String>) -> i32 {
 
         output::verify_failed(check_result.exit_code);
 
-        // Build feedback and re-run worker with --continue + error output
+        // Build fix prompt and write to temp file to avoid shell injection
         let combined = format!("{}{}", check_result.stdout, check_result.stderr);
         let feedback = VerifyFeedback::from_shell(check_result.exit_code, &combined);
 
@@ -112,9 +112,22 @@ pub async fn run(args: Vec<String>) -> i32 {
             check_cmd, check_result.exit_code, feedback.summary
         );
 
-        // Re-run worker with the fix prompt appended
-        let resume_cmd = format!("{worker_cmd} --continue \"{fix_prompt}\"");
-        match cmd.run_shell(&resume_cmd).await {
+        // Write prompt to temp file, pass via shell-safe mechanism
+        let tmp = std::env::temp_dir().join(format!("claude-run-fix-{}.txt", std::process::id()));
+        if let Err(e) = std::fs::write(&tmp, &fix_prompt) {
+            eprintln!("Failed to write fix prompt: {e}");
+            return 1;
+        }
+
+        // Re-run worker with --continue, reading prompt from temp file via cat
+        let prompt_escaped = tmp.display().to_string();
+        let resume_cmd = format!("{worker_cmd} --continue \"$(cat '{prompt_escaped}')\"");
+        let shell_result = cmd.run_shell(&resume_cmd).await;
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&tmp);
+
+        match shell_result {
             Ok(r) if r.exit_code != 0 => {
                 output::claude_error(r.exit_code);
                 return r.exit_code;
