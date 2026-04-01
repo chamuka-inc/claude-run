@@ -1,6 +1,11 @@
 use colored::Colorize;
 
-pub fn banner(session_name: &str, verify_cmd: Option<&str>, av: Option<(&str, u32)>) {
+pub fn banner(
+    session_name: &str,
+    verify_cmd: Option<&str>,
+    av: Option<(&str, u32)>,
+    pipeline_file: Option<&str>,
+) {
     let ts = chrono_now();
     println!(
         "{}",
@@ -19,6 +24,15 @@ pub fn banner(session_name: &str, verify_cmd: Option<&str>, av: Option<(&str, u3
         format!("Started: {ts}").dimmed(),
         "│".cyan()
     );
+    if let Some(path) = pipeline_file {
+        println!(
+            "{} {} {:<40} {}",
+            "│".cyan(),
+            "Pipeline:".cyan().bold(),
+            path,
+            "│".cyan()
+        );
+    }
     if let Some(cmd) = verify_cmd {
         println!(
             "{} {} {:<40} {}",

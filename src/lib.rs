@@ -10,6 +10,7 @@ pub mod slugify;
 pub mod stage;
 pub mod verdict;
 pub mod verifier;
+pub mod yaml_pipeline;
 
 use cli::Cli;
 use config::Config;
@@ -27,21 +28,45 @@ pub async fn run(cli: Cli) -> i32 {
 
     let config = Config::from_env();
 
-    // Resolve session name
-    let session_name = if cli.is_resume() {
-        cli.resume_target().unwrap_or("").to_string()
-    } else if let Some(name) = &cli.name {
-        name.clone()
-    } else if let Some(prompt) = &cli.prompt {
-        slugify::slugify(prompt)
+    // Load pipeline from YAML or build from CLI flags
+    let (pipeline, session_name) = if let Some(ref path) = cli.pipeline {
+        match yaml_pipeline::load_pipeline(std::path::Path::new(path)) {
+            Ok(p) => {
+                let name = cli.name.clone().unwrap_or_else(|| {
+                    std::path::Path::new(path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("pipeline")
+                        .to_string()
+                });
+                (p, name)
+            }
+            Err(e) => {
+                eprintln!("Error loading pipeline from {path}:\n{e}");
+                return 1;
+            }
+        }
     } else {
-        String::new()
+        // Resolve session name
+        let session_name = if cli.is_resume() {
+            cli.resume_target().unwrap_or("").to_string()
+        } else if let Some(name) = &cli.name {
+            name.clone()
+        } else if let Some(prompt) = &cli.prompt {
+            slugify::slugify(prompt)
+        } else {
+            String::new()
+        };
+        let pipeline = build_pipeline(&cli, &config);
+        (pipeline, session_name)
     };
 
-    output::banner(&session_name, cli.verify.as_deref(), cli.av_banner());
-
-    // Build the pipeline from CLI flags
-    let pipeline = build_pipeline(&cli, &config);
+    output::banner(
+        &session_name,
+        cli.verify.as_deref(),
+        cli.av_banner(),
+        cli.pipeline.as_deref(),
+    );
 
     let runner = PipelineRunner {
         config: config.clone(),

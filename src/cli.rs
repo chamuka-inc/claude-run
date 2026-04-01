@@ -13,6 +13,7 @@
 ///   --av-rounds N            Max review-fix rounds (default: 3)
 ///   --av-model MODEL         Model for reviewer
 ///   --av-prompt FILE         Custom reviewer prompt template
+///   --pipeline FILE          Load multi-stage pipeline from YAML
 ///   --help, -h               Show help
 ///   --version, -v            Show version
 ///
@@ -23,6 +24,7 @@ pub struct Cli {
     pub name: Option<String>,
     pub resume: Option<String>,
     pub verify: Option<String>,
+    pub pipeline: Option<String>,
     pub av: bool,
     pub av_spec: Option<String>,
     pub av_threshold: Option<u32>,
@@ -35,6 +37,7 @@ pub struct Cli {
 const HELP_TEXT: &str = "\
 Usage: claude-run [OPTIONS] \"prompt\"
        claude-run --resume [session-name]
+       claude-run --pipeline pipeline.yaml
 
 Run Claude Code non-interactively with automatic rate-limit retry.
 
@@ -43,6 +46,8 @@ Options:
   --resume [NAME]    Resume last session, or a named session
   --verify CMD       After Claude finishes, run CMD to verify. If it fails,
                      send Claude back in with the output to fix it.
+  --pipeline FILE    Load a multi-stage pipeline from a YAML file.
+                     Cannot be combined with --verify, --av, or a prompt.
   --help, -h         Show this help
   --version, -v      Show version
 
@@ -75,6 +80,7 @@ Examples:
   claude-run --verify \"make ci\" \"implement the login feature\"
   claude-run --av --av-spec spec.md --verify \"make ci\" \"implement the spec\"
   claude-run --av --av-threshold 90 --av-rounds 5 \"implement the spec\"
+  claude-run --pipeline pipeline.yaml
   claude-run --max-turns 50 --model opus \"implement the login feature\"
   claude-run --resume
   claude-run --resume login-feat";
@@ -83,7 +89,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Parse result — either a valid Cli or an early exit (help/version).
 pub enum ParseResult {
-    Ok(Cli),
+    Ok(Box<Cli>),
     Exit { message: String, code: i32 },
 }
 
@@ -137,6 +143,9 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> ParseResult {
             "--av-prompt" => {
                 cli.av_prompt = args.next();
             }
+            "--pipeline" => {
+                cli.pipeline = args.next();
+            }
             _ if arg.starts_with('-') => {
                 // Unknown flag — pass through to claude
                 cli.extra.push(arg);
@@ -158,7 +167,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> ParseResult {
         }
     }
 
-    ParseResult::Ok(cli)
+    ParseResult::Ok(Box::new(cli))
 }
 
 /// Parse from std::env::args (skipping argv[0]).
@@ -168,10 +177,32 @@ pub fn parse_from_env() -> ParseResult {
 
 impl Cli {
     pub fn validate(&self) -> Result<(), String> {
+        if self.pipeline.is_some() {
+            if self.verify.is_some() || self.av {
+                return Err(
+                    "Error: --pipeline cannot be combined with --verify or --av.\n\
+                     Use the YAML file to define verification stages."
+                        .into(),
+                );
+            }
+            if self.prompt.is_some() {
+                return Err(
+                    "Error: --pipeline cannot be combined with a prompt argument.\n\
+                     Define the prompt in the YAML file."
+                        .into(),
+                );
+            }
+            if self.resume.is_some() {
+                return Err("Error: --pipeline cannot be combined with --resume.".into());
+            }
+            return Ok(());
+        }
+
         if self.resume.is_none() && self.prompt.is_none() {
             return Err("Error: No prompt provided.\n\
                  Usage: claude-run \"your prompt\"\n\
-                        claude-run --resume [session-name]"
+                        claude-run --resume [session-name]\n\
+                        claude-run --pipeline pipeline.yaml"
                 .into());
         }
         Ok(())
@@ -203,7 +234,7 @@ mod tests {
 
     fn parse(args: &[&str]) -> Cli {
         match parse_args(args.iter().map(|s| s.to_string())) {
-            ParseResult::Ok(cli) => cli,
+            ParseResult::Ok(cli) => *cli,
             ParseResult::Exit { message, .. } => panic!("unexpected exit: {message}"),
         }
     }
@@ -402,5 +433,51 @@ mod tests {
         let (spec, threshold) = cli.av_banner().unwrap();
         assert_eq!(spec, "(auto-detect)");
         assert_eq!(threshold, 95);
+    }
+
+    // ─── Pipeline flag tests ───────────────────────────────────────
+
+    #[test]
+    fn parse_pipeline_flag() {
+        let cli = parse(&["--pipeline", "pipeline.yaml"]);
+        assert_eq!(cli.pipeline.as_deref(), Some("pipeline.yaml"));
+        assert!(cli.prompt.is_none());
+    }
+
+    #[test]
+    fn validate_pipeline_ok() {
+        let cli = parse(&["--pipeline", "pipeline.yaml"]);
+        assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_pipeline_with_verify_fails() {
+        let cli = parse(&["--pipeline", "p.yaml", "--verify", "make test"]);
+        assert!(cli.validate().is_err());
+    }
+
+    #[test]
+    fn validate_pipeline_with_av_fails() {
+        let cli = parse(&["--pipeline", "p.yaml", "--av"]);
+        assert!(cli.validate().is_err());
+    }
+
+    #[test]
+    fn validate_pipeline_with_prompt_fails() {
+        let cli = parse(&["--pipeline", "p.yaml", "some prompt"]);
+        assert!(cli.validate().is_err());
+    }
+
+    #[test]
+    fn validate_pipeline_with_resume_fails() {
+        let cli = parse(&["--pipeline", "p.yaml", "--resume"]);
+        assert!(cli.validate().is_err());
+    }
+
+    #[test]
+    fn validate_pipeline_with_name_ok() {
+        let cli = parse(&["--pipeline", "p.yaml", "--name", "my-session"]);
+        assert!(cli.validate().is_ok());
+        assert_eq!(cli.name.as_deref(), Some("my-session"));
     }
 }
