@@ -4,11 +4,17 @@
 /// directly to `claude` without requiring a `--` separator.
 ///
 /// Known flags:
-///   --name NAME      Session name
-///   --resume [NAME]  Resume a session
-///   --verify CMD     Verification command
-///   --help, -h       Show help
-///   --version, -v    Show version
+///   --name NAME              Session name
+///   --resume [NAME]          Resume a session
+///   --verify CMD             Verification command
+///   --adversarial-verify/--av  Enable adversarial spec-compliance review
+///   --av-spec FILE           Spec file for reviewer
+///   --av-threshold N         Minimum score to pass (default: 95)
+///   --av-rounds N            Max review-fix rounds (default: 3)
+///   --av-model MODEL         Model for reviewer
+///   --av-prompt FILE         Custom reviewer prompt template
+///   --help, -h               Show help
+///   --version, -v            Show version
 ///
 /// Everything else (unknown flags and the positional prompt) passes through.
 #[derive(Debug, Default)]
@@ -17,6 +23,12 @@ pub struct Cli {
     pub name: Option<String>,
     pub resume: Option<String>,
     pub verify: Option<String>,
+    pub av: bool,
+    pub av_spec: Option<String>,
+    pub av_threshold: Option<u32>,
+    pub av_rounds: Option<u32>,
+    pub av_model: Option<String>,
+    pub av_prompt: Option<String>,
     pub extra: Vec<String>,
 }
 
@@ -34,6 +46,15 @@ Options:
   --help, -h         Show this help
   --version, -v      Show version
 
+Adversarial Verification:
+  --adversarial-verify, --av
+                     Enable adversarial spec-compliance review
+  --av-spec FILE     Path to the spec file the reviewer checks against
+  --av-threshold N   Minimum score to pass (default: 95)
+  --av-rounds N      Max review-fix rounds (default: 3)
+  --av-model MODEL   Model for the reviewer (default: same as worker)
+  --av-prompt FILE   Custom reviewer prompt template
+
 All other flags are passed through to claude (e.g. --max-turns 50, --model opus).
 
 Environment variables:
@@ -44,11 +65,16 @@ Environment variables:
   CLAUDE_VERIFY_MAX        Max verify-fix cycles          (default: 5)
   CLAUDE_DAILY_CAP_POLL    Poll interval for daily cap    (default: 300)
   CLAUDE_DAILY_CAP_TIMEOUT Max wait for cap reset         (default: 28800)
+  CLAUDE_AV_THRESHOLD      Minimum spec-compliance score  (default: 95)
+  CLAUDE_AV_ROUNDS         Max adversarial review rounds  (default: 3)
+  CLAUDE_AV_MODEL          Override model for reviewer    (default: none)
 
 Examples:
   claude-run \"implement the login feature\"
   claude-run --name login-feat \"implement the login feature\"
   claude-run --verify \"make ci\" \"implement the login feature\"
+  claude-run --av --av-spec spec.md --verify \"make ci\" \"implement the spec\"
+  claude-run --av --av-threshold 90 --av-rounds 5 \"implement the spec\"
   claude-run --max-turns 50 --model opus \"implement the login feature\"
   claude-run --resume
   claude-run --resume login-feat";
@@ -92,6 +118,24 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> ParseResult {
                     args.next(); // consume the peeked value
                 }
                 cli.resume = Some(target.unwrap_or_default());
+            }
+            "--adversarial-verify" | "--av" => {
+                cli.av = true;
+            }
+            "--av-spec" => {
+                cli.av_spec = args.next();
+            }
+            "--av-threshold" => {
+                cli.av_threshold = args.next().and_then(|v| v.parse().ok());
+            }
+            "--av-rounds" => {
+                cli.av_rounds = args.next().and_then(|v| v.parse().ok());
+            }
+            "--av-model" => {
+                cli.av_model = args.next();
+            }
+            "--av-prompt" => {
+                cli.av_prompt = args.next();
             }
             _ if arg.starts_with('-') => {
                 // Unknown flag — pass through to claude
@@ -139,6 +183,17 @@ impl Cli {
 
     pub fn resume_target(&self) -> Option<&str> {
         self.resume.as_deref().filter(|s| !s.is_empty())
+    }
+
+    /// Banner info for adversarial verification, if enabled.
+    pub fn av_banner(&self) -> Option<(&str, u32)> {
+        if self.av {
+            let spec = self.av_spec.as_deref().unwrap_or("(auto-detect)");
+            let threshold = self.av_threshold.unwrap_or(95);
+            Some((spec, threshold))
+        } else {
+            None
+        }
     }
 }
 
@@ -222,7 +277,6 @@ mod tests {
 
     #[test]
     fn parse_resume_followed_by_flag() {
-        // --resume followed by a flag should not consume the flag as the target
         let cli = parse(&["--resume", "--verbose"]);
         assert!(cli.is_resume());
         assert_eq!(cli.resume_target(), None);
@@ -267,5 +321,86 @@ mod tests {
             }
             ParseResult::Ok(_) => panic!("expected exit"),
         }
+    }
+
+    // ─── Adversarial verification flag tests ───────────────────────
+
+    #[test]
+    fn parse_av_flag() {
+        let cli = parse(&["--av", "implement the spec"]);
+        assert!(cli.av);
+        assert_eq!(cli.prompt.as_deref(), Some("implement the spec"));
+    }
+
+    #[test]
+    fn parse_adversarial_verify_long_form() {
+        let cli = parse(&["--adversarial-verify", "implement the spec"]);
+        assert!(cli.av);
+    }
+
+    #[test]
+    fn parse_av_with_all_options() {
+        let cli = parse(&[
+            "--av",
+            "--av-spec",
+            "spec.md",
+            "--av-threshold",
+            "90",
+            "--av-rounds",
+            "5",
+            "--av-model",
+            "opus",
+            "--av-prompt",
+            "custom.txt",
+            "--verify",
+            "make ci",
+            "implement the spec",
+        ]);
+        assert!(cli.av);
+        assert_eq!(cli.av_spec.as_deref(), Some("spec.md"));
+        assert_eq!(cli.av_threshold, Some(90));
+        assert_eq!(cli.av_rounds, Some(5));
+        assert_eq!(cli.av_model.as_deref(), Some("opus"));
+        assert_eq!(cli.av_prompt.as_deref(), Some("custom.txt"));
+        assert_eq!(cli.verify.as_deref(), Some("make ci"));
+        assert_eq!(cli.prompt.as_deref(), Some("implement the spec"));
+    }
+
+    #[test]
+    fn parse_av_threshold_invalid_falls_back() {
+        let cli = parse(&["--av", "--av-threshold", "abc", "implement"]);
+        assert!(cli.av);
+        assert_eq!(cli.av_threshold, None); // invalid parse → None
+    }
+
+    #[test]
+    fn av_banner_when_enabled() {
+        let cli = parse(&[
+            "--av",
+            "--av-spec",
+            "spec.md",
+            "--av-threshold",
+            "90",
+            "implement",
+        ]);
+        let banner = cli.av_banner();
+        assert!(banner.is_some());
+        let (spec, threshold) = banner.unwrap();
+        assert_eq!(spec, "spec.md");
+        assert_eq!(threshold, 90);
+    }
+
+    #[test]
+    fn av_banner_when_disabled() {
+        let cli = parse(&["implement"]);
+        assert!(cli.av_banner().is_none());
+    }
+
+    #[test]
+    fn av_banner_defaults() {
+        let cli = parse(&["--av", "implement"]);
+        let (spec, threshold) = cli.av_banner().unwrap();
+        assert_eq!(spec, "(auto-detect)");
+        assert_eq!(threshold, 95);
     }
 }

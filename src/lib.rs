@@ -2,15 +2,21 @@ pub mod cli;
 pub mod config;
 pub mod notify;
 pub mod output;
+pub mod pipeline;
+pub mod prompts;
 pub mod rate_limit;
 pub mod runner;
 pub mod slugify;
-pub mod verify;
+pub mod stage;
+pub mod verdict;
+pub mod verifier;
 
 use cli::Cli;
 use config::Config;
-use runner::{ClaudeRunner, TokioCommandRunner};
-use verify::VerifyOutcome;
+use pipeline::{Pipeline, PipelineOutcome, PipelineRunner, PipelineStep};
+use runner::TokioCommandRunner;
+use stage::Stage;
+use verifier::{VerdictParser, Verifier};
 
 /// Top-level entry point. Returns the process exit code.
 pub async fn run(cli: Cli) -> i32 {
@@ -32,43 +38,99 @@ pub async fn run(cli: Cli) -> i32 {
         String::new()
     };
 
-    output::banner(&session_name, cli.verify.as_deref());
+    output::banner(&session_name, cli.verify.as_deref(), cli.av_banner());
 
-    let runner = ClaudeRunner {
+    // Build the pipeline from CLI flags
+    let pipeline = build_pipeline(&cli, &config);
+
+    let runner = PipelineRunner {
         config: config.clone(),
-        session_name: session_name.clone(),
+        base_session: session_name.clone(),
         extra_args: cli.extra.clone(),
         cmd: TokioCommandRunner,
     };
 
-    // First run
-    let (prompt, is_resume) = if cli.is_resume() {
-        ("continue where you left off".to_string(), true)
-    } else {
-        (cli.prompt.clone().unwrap(), false)
-    };
+    let outcome = runner.run(&pipeline).await;
 
-    if let Err(e) = runner.run_with_retry(&prompt, is_resume).await {
-        notify::notify(
-            &format!("Failed (exit {}): {session_name}", e.exit_code()),
-            config.notify,
-        );
-        return e.exit_code();
-    }
-
-    // Verify loop
-    if let Some(verify_cmd) = &cli.verify {
-        match verify::run_verify_loop(&runner, verify_cmd).await {
-            VerifyOutcome::Passed { .. } => {}
-            VerifyOutcome::ExhaustedRounds => return 1,
-            VerifyOutcome::ClaudeFailed { exit_code, .. } => {
-                notify::notify(&format!("Fix failed: {session_name}"), config.notify);
-                return exit_code;
-            }
+    match &outcome {
+        PipelineOutcome::Success => {
+            output::done(&session_name);
+            notify::notify(&format!("Task complete: {session_name}"), config.notify);
+        }
+        PipelineOutcome::VerifyExhausted => {
+            notify::notify(
+                &format!("Verification exhausted: {session_name}"),
+                config.notify,
+            );
+        }
+        PipelineOutcome::StageFailed { .. } => {
+            notify::notify(
+                &format!("Failed (exit {}): {session_name}", outcome.exit_code()),
+                config.notify,
+            );
         }
     }
 
-    output::done(&session_name);
-    notify::notify(&format!("Task complete: {session_name}"), config.notify);
-    0
+    outcome.exit_code()
+}
+
+/// Build a Pipeline from CLI flags.
+fn build_pipeline(cli: &Cli, config: &Config) -> Pipeline {
+    let prompt = if cli.is_resume() {
+        "continue where you left off".to_string()
+    } else {
+        cli.prompt.clone().unwrap()
+    };
+
+    let worker = Stage::claude_worker(&prompt);
+
+    // Determine the verifier (if any)
+    let verifier = build_verifier(cli);
+
+    let steps = match verifier {
+        Some(v) => {
+            let max_rounds = if cli.av {
+                cli.av_rounds.unwrap_or(config.av_rounds())
+            } else {
+                config.verify_max
+            };
+            vec![PipelineStep::VerifyLoop {
+                worker,
+                verifier: v,
+                max_rounds,
+            }]
+        }
+        None => vec![PipelineStep::Run(worker)],
+    };
+
+    Pipeline { steps }
+}
+
+/// Build a Verifier from CLI flags.
+fn build_verifier(cli: &Cli) -> Option<Verifier> {
+    let shell_verifier = cli.verify.as_ref().map(|cmd| Verifier::Shell {
+        command: cmd.clone(),
+    });
+
+    let av_verifier = if cli.av {
+        let original_prompt = cli.prompt.as_deref().unwrap_or("");
+        let review_prompt = prompts::build_review_prompt(original_prompt, cli.av_spec.as_deref());
+
+        let threshold = cli.av_threshold.unwrap_or(95);
+
+        let reviewer_stage = Stage::claude_reviewer(review_prompt, "-av", cli.av_model.clone());
+
+        Some(Verifier::Claude {
+            stage: reviewer_stage,
+            verdict_parser: VerdictParser::ScoreThreshold { threshold },
+        })
+    } else {
+        None
+    };
+
+    match (shell_verifier, av_verifier) {
+        (Some(shell), Some(av)) => Some(Verifier::Chain(vec![shell, av])),
+        (Some(v), None) | (None, Some(v)) => Some(v),
+        (None, None) => None,
+    }
 }

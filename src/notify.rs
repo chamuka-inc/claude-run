@@ -1,5 +1,3 @@
-use std::process::Command;
-
 /// Send a macOS notification. No-op on other platforms or if disabled.
 pub fn notify(message: &str, enabled: bool) {
     if !enabled {
@@ -8,6 +6,7 @@ pub fn notify(message: &str, enabled: bool) {
 
     #[cfg(target_os = "macos")]
     {
+        use std::process::Command;
         let script = format!(
             "display notification \"{}\" with title \"claude-run\"",
             message.replace('\\', "\\\\").replace('"', "\\\"")
