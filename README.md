@@ -1,79 +1,79 @@
 # claude-run
 
-Non-interactive CLI that orchestrates [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions with automatic rate-limit retry, verification loops, adversarial spec-compliance review, and multi-stage YAML pipelines.
+Non-interactive CLI that orchestrates [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions. Four composable subcommands — each does one thing, all work together.
 
 ## Install
 
 ```bash
-cargo install --path .
+cargo install --path crates/cli
 ```
 
 Requires the `claude` CLI to be installed and on your PATH.
 
-## Quick Start
+## Subcommands
+
+### `retry` — Rate-limit retry wrapper
+
+Wraps a Claude invocation with exponential backoff, daily-cap polling, and auto-resume.
 
 ```bash
-# Run Claude with automatic rate-limit retry
-claude-run "implement the login feature"
-
-# Run + verify: loop until tests pass
-claude-run --verify "make ci" "implement the login feature"
-
-# Adversarial review: a second Claude scores spec compliance
-claude-run --av --av-spec spec.md --verify "make ci" "implement the spec"
-
-# Multi-stage pipeline from YAML
-claude-run --pipeline pipeline.yaml
+claude-run retry "implement the login feature"
+claude-run retry --name my-feat --model opus "implement the feature"
+claude-run retry --resume my-feat
 ```
 
-## How It Works
+### `verify` — Generic verify-fix loop
 
-Every use case follows the same pattern: **run work, check work, loop on failure**.
-
-```
-claude-run "implement feature" --verify "make test"
-
-  ┌─────────────────┐
-  │  Claude (worker) │──→ implements feature
-  └────────┬────────┘
-           │
-  ┌────────▼────────┐
-  │  make test       │──→ runs tests
-  └────────┬────────┘
-           │
-      pass? → done
-      fail? → send Claude back with the error output
-           │
-      (repeat up to 5 rounds)
-```
-
-### Rate-Limit Recovery
-
-Every Claude invocation gets automatic retry with exponential backoff. If fast retries are exhausted, switches to daily-cap polling mode — probes periodically until the cap resets, then resumes the session.
-
-### Verify-Fix Loop
-
-After Claude finishes, run a shell command to verify. If it fails, the error output is sent back to Claude with `--continue` to fix. Repeats up to `CLAUDE_VERIFY_MAX` rounds.
-
-### Adversarial Verification
-
-A second, independent Claude instance reads the spec and scores the implementation 0-100. If the score is below threshold (default: 95), the worker gets itemized feedback (missing, partial, incorrect) and tries again.
+Run a worker command, then a check command. If the check fails, feed the error output back to the worker. Not Claude-specific — works with any commands.
 
 ```bash
-claude-run --av --av-spec spec.md --verify "make ci" "implement the spec"
+claude-run verify \
+  --worker 'claude-run retry --name feat "implement login"' \
+  --check 'make test'
 ```
 
-This chains: tests must pass first (fast, free), then the reviewer scores against the spec. The reviewer gets a fresh session each round — no shared context with the worker.
+### `review` — Adversarial spec-compliance scorer
 
-### Multi-Stage YAML Pipelines
+Launch an independent Claude instance that reads a spec and scores the current implementation 0-100. Outputs a structured verdict to stdout.
 
-For complex workflows, define stages in YAML:
+```bash
+claude-run review --spec spec.md --threshold 95
+claude-run review --spec spec.md --model opus --threshold 90
+```
+
+Exit code 0 if score >= threshold, 1 if below.
+
+### `pipeline` — YAML multi-stage orchestrator
+
+Execute complex multi-stage workflows defined in YAML.
+
+```bash
+claude-run pipeline pipeline.yaml
+```
+
+## Composition
+
+The power is in how subcommands compose:
+
+```bash
+# Simple: implement + test
+claude-run verify \
+  --worker 'claude-run retry --name feat "implement login"' \
+  --check 'make test'
+
+# With adversarial review (chain checks with &&)
+claude-run verify \
+  --worker 'claude-run retry --name feat "implement the spec"' \
+  --check 'make ci && claude-run review --spec spec.md --threshold 95'
+```
+
+Or define it all in YAML:
 
 ```yaml
 stages:
   - name: implement
     type: claude
-    prompt: "Implement the spec in spec.md. Production code only."
+    prompt: "Implement the spec in spec.md."
 
   - name: write-tests
     type: claude
@@ -107,52 +107,6 @@ stages:
           prompt: "Score the implementation 0-100."
 ```
 
-```bash
-claude-run --pipeline pipeline.yaml
-```
-
-#### Stage Types
-
-| Type | Description |
-|------|-------------|
-| `claude` | Run a Claude Code instance with a prompt |
-| `shell` | Run a shell command |
-| `verify-loop` | Run a worker, verify, loop on failure |
-| `parallel` | Run inner stages concurrently |
-
-#### Verifier Types
-
-| Type | Description |
-|------|-------------|
-| `shell` | Pass if exit code 0 |
-| `claude` | Run a reviewer, parse verdict (`score`, `passfail`, `exitcode`) |
-| `chain` | Run multiple verifiers in sequence (all must pass) |
-
-## CLI Reference
-
-```
-Usage: claude-run [OPTIONS] "prompt"
-       claude-run --resume [session-name]
-       claude-run --pipeline pipeline.yaml
-
-Options:
-  --name NAME        Session name (default: auto-generated from prompt)
-  --resume [NAME]    Resume last session, or a named session
-  --verify CMD       Verify after Claude finishes; loop on failure
-  --pipeline FILE    Load multi-stage pipeline from YAML
-  --help, -h         Show help
-  --version, -v      Show version
-
-Adversarial Verification:
-  --av               Enable adversarial spec-compliance review
-  --av-spec FILE     Spec file for the reviewer
-  --av-threshold N   Minimum score to pass (default: 95)
-  --av-rounds N      Max review-fix rounds (default: 3)
-  --av-model MODEL   Model for reviewer (default: same as worker)
-
-All other flags pass through to claude (e.g. --max-turns 50, --model opus).
-```
-
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -170,29 +124,23 @@ All other flags pass through to claude (e.g. --max-turns 50, --model opus).
 
 ## Architecture
 
+Cargo workspace with one binary and a shared library:
+
 ```
-src/
-├── main.rs           Entry point
-├── lib.rs            CLI → Pipeline → PipelineRunner
-├── cli.rs            Argument parsing (pass-through for unknown flags)
-├── config.rs         Environment variable configuration
-├── stage.rs          Stage (Claude | Shell) — unit of work
-├── verifier.rs       Verifier (Shell | Claude | Chain) — checks work
-├── pipeline.rs       Pipeline, PipelineStep, PipelineRunner
-├── verdict.rs        <verdict>SCORE: N</verdict> parsing
-├── prompts.rs        Reviewer and fix prompt templates
-├── yaml_pipeline.rs  YAML → Pipeline deserialization
-├── runner.rs         CommandRunner trait (subprocess abstraction)
-├── rate_limit.rs     Rate-limit detection and exponential backoff
-├── output.rs         Terminal output formatting
-├── notify.rs         macOS notifications
-└── slugify.rs        Prompt → session name
+crates/
+├── lib/          Shared engine: pipeline runner, stage execution,
+│                 rate-limit retry, verdict parsing, YAML loader
+├── retry/        claude-run retry subcommand
+├── verify/       claude-run verify subcommand
+├── review/       claude-run review subcommand
+├── pipeline/     claude-run pipeline subcommand
+└── cli/          Main binary: subcommand dispatcher
 ```
 
 ## Development
 
 ```bash
-make check    # fmt + clippy + test
+make check    # fmt + clippy + test (full workspace)
 make ci       # same as check
 make deploy   # build release + install
 ```

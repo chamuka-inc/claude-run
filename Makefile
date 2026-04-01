@@ -7,23 +7,23 @@ release:
 	cargo build --release
 
 test:
-	cargo test
+	cargo test --workspace
 
 lint:
-	cargo clippy -- -D warnings
+	cargo clippy --workspace -- -D warnings
 
 fmt:
-	cargo fmt
+	cargo fmt --all
 
 check:
-	cargo fmt -- --check
-	cargo clippy -- -D warnings
-	cargo test
+	cargo fmt --all -- --check
+	cargo clippy --workspace -- -D warnings
+	cargo test --workspace
 
 ci: check
 
 deploy: release
-	cargo install --path .
+	cargo install --path crates/cli
 
 clean:
 	cargo clean

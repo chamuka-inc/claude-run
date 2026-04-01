@@ -1,0 +1,9 @@
+[package]
+name = "claude-run-review"
+version.workspace = true
+edition.workspace = true
+description = "Adversarial spec-compliance review subcommand for claude-run"
+
+[dependencies]
+claude-run-lib = { workspace = true }
+tokio = { workspace = true }
