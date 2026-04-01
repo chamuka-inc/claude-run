@@ -2,49 +2,52 @@
 
 ## Problem
 
-The current `--verify` flag runs a **shell command** (e.g. `make test`) to check
-Claude's work. This catches regressions that have deterministic test coverage,
-but misses an entire class of issues:
+When given a large specification file, Claude tends to implement the minimum it
+can get away with — the happy path, the obvious features, the parts that are
+easy. It skips edge cases, omits secondary requirements, stubs out complex
+sections, and calls it done. Existing `--verify` only catches what tests cover,
+and if Claude wrote those tests too, it's marking its own homework.
 
-- Subtle logic errors that pass tests but violate intent
-- Security vulnerabilities not covered by existing tests
-- Tests that were written by the same Claude session (marking its own homework)
-- Prompt-adherence issues (code works but doesn't match what was asked)
-- Code quality issues, unnecessary complexity, dead code
-- Edge cases the original session didn't consider
-
-**Adversarial verification** solves this by launching a second, independent
-Claude process whose sole job is to critically review the first process's work
-and find problems.
+**Adversarial verification** launches a second, independent Claude process that
+reads the spec, reads the implementation, and scores how faithfully the spec was
+implemented. The loop retries until the score meets a threshold.
 
 ## Design Principles
 
-1. **Composition over complexity** — reuse `claude-run` itself as the reviewer
-2. **Adversarial by default** — the reviewer's system prompt is skeptical, not helpful
-3. **Structured verdicts** — the reviewer outputs a machine-parseable pass/fail
-4. **Independent context** — the reviewer gets a fresh session (no shared memory with the worker)
-5. **Combine, don't replace** — adversarial review works alongside `--verify`, not instead of it
+1. **Spec is the source of truth** — the reviewer scores against the spec, not
+   its own opinion of what good code looks like
+2. **Numeric score, not vibes** — a concrete 0-100 rating with itemized
+   deductions, not "looks good" or "needs work"
+3. **Threshold-driven loop** — keep sending the worker back until the score
+   meets the bar (default: 95)
+4. **Independent context** — the reviewer gets a fresh session with no shared
+   memory with the worker
+5. **Combine, don't replace** — works alongside `--verify` (tests must pass
+   before the reviewer even looks)
 
 ## CLI Interface
 
 ```
-claude-run --adversarial-verify [OPTIONS] "prompt"
-claude-run --adversarial-verify --verify "make ci" "prompt"
+claude-run --adversarial-verify [OPTIONS] "implement the spec in spec.md"
+claude-run --av --verify "make ci" "implement the spec in spec.md"
 ```
 
 ### New Flags
 
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--adversarial-verify` | `--av` | Enable adversarial verification after worker completes |
-| `--av-prompt FILE\|STR` | | Custom reviewer prompt (default: built-in) |
-| `--av-rounds N` | | Max review-fix rounds (default: 3) |
-| `--av-model MODEL` | | Model for the reviewer (default: same as worker) |
+| Flag | Description |
+|------|-------------|
+| `--adversarial-verify` / `--av` | Enable adversarial spec-compliance review |
+| `--av-spec FILE` | Path to the spec file the reviewer checks against. If omitted, the reviewer is told to look for the spec referenced in the original prompt |
+| `--av-threshold N` | Minimum score to pass (default: 95) |
+| `--av-rounds N` | Max review-fix rounds (default: 3) |
+| `--av-model MODEL` | Model for the reviewer (default: same as worker) |
+| `--av-prompt FILE` | Custom reviewer prompt template (advanced) |
 
 ### New Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `CLAUDE_AV_THRESHOLD` | `95` | Minimum spec-compliance score to pass |
 | `CLAUDE_AV_ROUNDS` | `3` | Max adversarial review-fix rounds |
 | `CLAUDE_AV_MODEL` | (none) | Override model for reviewer process |
 
@@ -53,185 +56,291 @@ claude-run --adversarial-verify --verify "make ci" "prompt"
 ### Execution Flow
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      claude-run orchestrator                │
-│                                                             │
-│  1. Worker phase (existing)                                 │
-│     ┌──────────────┐                                        │
-│     │  Claude #1    │──→ writes code, makes changes         │
-│     │  (worker)     │                                       │
-│     └──────────────┘                                        │
-│                                                             │
-│  2. Deterministic verify (existing --verify)                │
-│     ┌──────────────┐                                        │
-│     │  Shell cmd    │──→ make ci, cargo test, etc.          │
-│     └──────────────┘                                        │
-│                                                             │
-│  3. Adversarial verify (new --adversarial-verify)           │
-│     ┌──────────────┐       ┌──────────────┐                 │
-│     │  Claude #2    │──→──→│  Verdict      │                │
-│     │  (reviewer)   │  │   │  Parser       │                │
-│     └──────────────┘  │   └──────┬───────┘                 │
-│                        │          │                          │
-│           review       │     PASS │ FAIL                    │
-│           prompt       │          │                          │
-│                        │          ▼                          │
-│                        │   ┌──────────────┐                 │
-│                        │   │  Claude #1    │  (resume)       │
-│                        │   │  (worker)     │──→ fix issues   │
-│                        │   └──────────────┘                 │
-│                        │          │                          │
-│                        └──────────┘  (loop up to N rounds)  │
-│                                                             │
-│  4. Notify                                                  │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                       claude-run orchestrator                    │
+│                                                                  │
+│  1. Worker phase (existing)                                      │
+│     ┌──────────────┐                                             │
+│     │  Claude #1    │──→ reads spec, writes code                 │
+│     │  (worker)     │                                            │
+│     └──────────────┘                                             │
+│                                                                  │
+│  2. Deterministic verify (existing --verify, optional)           │
+│     ┌──────────────┐                                             │
+│     │  Shell cmd    │──→ make ci, cargo test, etc.               │
+│     └──────────────┘                                             │
+│                                                                  │
+│  3. Adversarial spec-compliance review (new --av)                │
+│     ┌──────────────┐       ┌──────────────┐                      │
+│     │  Claude #2    │──→──→│  Score        │                     │
+│     │  (reviewer)   │  │   │  Parser       │                     │
+│     └──────────────┘  │   └──────┬───────┘                      │
+│                        │     score │                              │
+│                        │          │                               │
+│                        │    ≥ 95? ├── YES → done                 │
+│                        │          │                               │
+│                        │     NO   ▼                               │
+│                        │   ┌──────────────┐                      │
+│                        │   │  Claude #1    │  (resume)            │
+│                        │   │  (worker)     │──→ address gaps     │
+│                        │   └──────────────┘                      │
+│                        │          │                               │
+│                        │    (re-run --verify if present)          │
+│                        │          │                               │
+│                        └──────────┘  (loop up to N rounds)       │
+│                                                                  │
+│  4. Exit with final score                                        │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Design Decision: Reviewer as a Separate Claude Process
+### Why a Second Claude Process?
 
-The reviewer runs as a **separate `claude` invocation** (not `claude-run`). This
-is critical because:
-
-- **Fresh context**: No shared session memory with the worker — the reviewer
-  sees only the code on disk and the git diff, not the worker's reasoning
-- **No tool leakage**: The reviewer doesn't inherit the worker's session state
-- **Independent judgment**: Can use a different model (e.g. worker=sonnet,
-  reviewer=opus) for diversity of thought
+- **Fresh context**: No shared session memory — the reviewer sees the spec and
+  the code on disk, not the worker's reasoning or excuses
+- **No anchoring**: The worker's internal "I did a good job" narrative doesn't
+  influence the reviewer
+- **Model diversity**: Use a different (potentially stronger) model for review
 - **Simple implementation**: Just another `run_claude()` call through the
   existing `CommandRunner` trait
 
-### Reviewer Prompt Construction
+## Reviewer Prompt
 
-The orchestrator builds the reviewer's prompt from three pieces:
+The reviewer prompt is the core of the system. It must produce a structured,
+parseable output with a numeric score and itemized findings.
+
+### Default Reviewer Prompt Template
+
+```
+You are a strict spec-compliance auditor. Your job is to score how completely
+and faithfully a specification has been implemented. You are not here to be
+helpful or encouraging — you are here to find gaps.
+
+## The Specification
+Read the spec file: {spec_file}
+
+## Your Audit Process
+1. Read the spec file completely. List every discrete requirement (functional
+   requirements, edge cases, error handling, configuration options, API
+   contracts, data formats, validation rules, etc.)
+2. For each requirement, check whether it is implemented by reading the
+   relevant source files
+3. Score the implementation
+
+## Scoring Rules
+- Start at 100
+- For each requirement that is completely missing: -10 to -20 depending on
+  importance
+- For each requirement that is partially implemented (stubbed, TODO, happy
+  path only): -5 to -10
+- For each requirement that is implemented but incorrectly: -5 to -15
+- Minimum score is 0
+
+## Output Format
+You MUST end your response with a verdict block in exactly this format:
+
+<verdict>
+SCORE: {number}
+
+MISSING:
+- [file:line] requirement X from spec section Y is not implemented
+- [file:line] requirement Z is stubbed with a TODO
+
+PARTIAL:
+- [file:line] requirement A only handles the happy path, spec requires error handling for ...
+- [file:line] requirement B is implemented but missing the edge case where ...
+
+INCORRECT:
+- [file:line] requirement C is implemented but does X when spec says Y
+</verdict>
+
+Be specific. Cite the spec section and the source file. If everything is
+fully implemented, output SCORE: 100 with empty sections.
+```
+
+### Prompt Construction
 
 ```
 ┌──────────────────────────────────────────┐
-│  1. System framing (adversarial role)    │
-│  2. Original task context                │
-│  3. Review instructions + verdict format │
+│  1. Auditor role framing                 │
+│  2. Spec file reference                  │
+│  3. Audit process instructions           │
+│  4. Scoring rubric                       │
+│  5. Structured output format             │
 └──────────────────────────────────────────┘
 ```
 
-#### Default Reviewer Prompt Template
+When `--av-spec` is provided, `{spec_file}` is the literal path. When omitted,
+the prompt says: "The spec is referenced in the original task prompt. The
+developer was asked to: {original_prompt}. Find and read the spec file."
 
-```
-You are a critical code reviewer performing adversarial verification.
-Your job is to find problems, not to be helpful or encouraging.
-
-## Original Task
-The developer was asked to: {original_prompt}
-
-## Your Review Process
-1. Read the git diff to understand what changed: run `git diff HEAD~1` (or
-   appropriate range)
-2. Read the affected files in full context
-3. Try to find:
-   - Logic errors or off-by-one bugs
-   - Security vulnerabilities (injection, auth bypass, etc.)
-   - Missing error handling at system boundaries
-   - Cases where the code doesn't match the stated task
-   - Tests that don't actually test what they claim
-   - Regressions in existing functionality
-
-## Verdict
-After your review, you MUST output a verdict block as the very last thing:
-
-If everything looks correct:
-<verdict>PASS</verdict>
-
-If you found real issues that need fixing:
-<verdict>FAIL
-- issue 1 description
-- issue 2 description
-</verdict>
-
-Only flag genuine issues. Do not flag style preferences, naming opinions,
-or hypothetical concerns. Be specific — cite file paths and line numbers.
-```
-
-### Verdict Parsing
-
-The orchestrator captures the reviewer's stdout and parses the verdict:
+## Verdict Parsing
 
 ```rust
-enum ReviewVerdict {
-    Pass,
-    Fail { issues: Vec<String> },
-    NoVerdict, // reviewer didn't output a verdict block
+pub struct ReviewScore {
+    pub score: u32,
+    pub missing: Vec<String>,
+    pub partial: Vec<String>,
+    pub incorrect: Vec<String>,
 }
 
-fn parse_verdict(output: &str) -> ReviewVerdict {
-    // Find last <verdict>...</verdict> block in output
-    // Parse PASS vs FAIL + issue list
+pub enum ReviewVerdict {
+    Scored(ReviewScore),
+    NoVerdict,  // reviewer didn't produce a parseable verdict
 }
 ```
 
-`NoVerdict` is treated as `Fail` with a generic "reviewer did not produce a
-structured verdict" message — this prevents the reviewer from silently passing
-by omission.
+### Parsing Logic
 
-### Fix Prompt Construction
+1. Find the last `<verdict>...</verdict>` block in the reviewer's output
+2. Extract `SCORE: N` — parse as u32, clamp to 0-100
+3. Extract items under `MISSING:`, `PARTIAL:`, `INCORRECT:` sections
+4. If no verdict block found → `NoVerdict` (treated as score 0)
 
-When the reviewer finds issues, the orchestrator sends the worker back in with:
+`NoVerdict` is treated as a failure, not a pass. This prevents the reviewer
+from silently passing by omitting the verdict.
+
+### Score Threshold
 
 ```
-An independent code reviewer found the following issues with your work:
-
-{issues}
-
-Fix these issues. Do not argue with the reviewer — address each point
-with a concrete code change.
+score >= threshold → PASS (exit the loop)
+score <  threshold → FAIL (send worker back to fix)
 ```
 
-This deliberately doesn't include the reviewer's full reasoning — just the
-actionable issue list. This prevents the worker from "debating" the reviewer
-and forces it to address the concrete feedback.
+Default threshold: **95** (not 100 — allows minor style deductions without
+infinite loops).
 
-### The Adversarial-Verify Loop
+## Fix Prompt Construction
+
+When the reviewer scores below threshold, the orchestrator sends the worker
+back with a focused fix prompt:
+
+```
+A spec-compliance audit scored your implementation {score}/100.
+The threshold is {threshold}. You need to address these gaps:
+
+## Missing (not implemented)
+{missing items}
+
+## Partial (incomplete implementation)
+{partial items}
+
+## Incorrect (wrong behavior)
+{incorrect items}
+
+Go through each item and implement it fully. Do not skip any.
+Do not add TODO comments — write the actual implementation.
+```
+
+Key design choices:
+- **Score is included** — creates urgency and a concrete target
+- **Items are categorized** — missing vs. partial vs. incorrect need different
+  responses from the worker
+- **"Do not add TODO comments"** — directly addresses the laziness failure mode
+- **Reviewer's reasoning is excluded** — just the actionable list, prevents
+  the worker from arguing
+
+## The Adversarial Loop
 
 ```rust
+pub enum AdversarialOutcome {
+    Passed { score: u32, round: u32 },
+    ExhaustedRounds { final_score: u32 },
+    WorkerFailed { exit_code: i32, round: u32 },
+    ReviewerFailed { exit_code: i32, round: u32 },
+}
+
 pub async fn run_adversarial_loop<R: CommandRunner>(
     worker: &ClaudeRunner<R>,
     original_prompt: &str,
+    verify_cmd: Option<&str>,
     av_config: &AdversarialConfig,
 ) -> AdversarialOutcome {
+    let mut last_score = 0;
+
     for round in 1..=av_config.max_rounds {
-        // 1. Launch reviewer
-        let review_prompt = build_review_prompt(original_prompt, round);
-        let review_result = worker.cmd.run_claude(&build_reviewer_args(
+        output::av_round(round, av_config.max_rounds);
+
+        // 1. Launch reviewer (fresh session, captures stdout)
+        let review_prompt = build_review_prompt(
+            original_prompt,
+            &av_config.spec_file,
+            round,
+        );
+        let reviewer_args = build_reviewer_args(
             &review_prompt,
-            &av_config,
+            av_config,
             &worker.session_name,
             round,
-        )).await;
+        );
+        let review_result = worker.cmd
+            .run_claude_capturing(&reviewer_args)
+            .await?;
 
         // 2. Parse verdict
         let verdict = parse_verdict(&review_result.stdout);
+        let score = match &verdict {
+            ReviewVerdict::Scored(s) => {
+                output::av_score(s.score, av_config.threshold);
+                last_score = s.score;
+                s
+            }
+            ReviewVerdict::NoVerdict => {
+                output::av_no_verdict();
+                last_score = 0;
+                // Synthesize a zero-score result
+                &ReviewScore {
+                    score: 0,
+                    missing: vec!["Reviewer did not produce a verdict".into()],
+                    partial: vec![],
+                    incorrect: vec![],
+                }
+            }
+        };
 
-        match verdict {
-            ReviewVerdict::Pass => return AdversarialOutcome::Passed { round },
-            ReviewVerdict::Fail { issues } | ReviewVerdict::NoVerdict => {
-                // 3. Send worker back to fix
-                let fix_prompt = build_fix_prompt(&issues);
-                worker.run_with_retry(&fix_prompt, true).await?;
+        // 3. Check threshold
+        if score.score >= av_config.threshold {
+            output::av_passed(score.score);
+            return AdversarialOutcome::Passed {
+                score: score.score,
+                round,
+            };
+        }
 
-                // 4. Optionally re-run deterministic verify
-                //    (if --verify was also provided)
+        // 4. Last round? Don't fix, just report.
+        if round == av_config.max_rounds {
+            break;
+        }
+
+        // 5. Send worker back to fix
+        let fix_prompt = build_fix_prompt(score, av_config.threshold);
+        output::av_fixing(score.score, av_config.threshold);
+        worker.run_with_retry(&fix_prompt, true).await?;
+
+        // 6. Re-run deterministic verify if present
+        if let Some(cmd) = verify_cmd {
+            match verify::run_verify_loop(worker, cmd).await {
+                VerifyOutcome::Passed { .. } => {}
+                VerifyOutcome::ExhaustedRounds => {
+                    return AdversarialOutcome::WorkerFailed {
+                        exit_code: 1,
+                        round,
+                    };
+                }
+                VerifyOutcome::ClaudeFailed { exit_code, .. } => {
+                    return AdversarialOutcome::WorkerFailed {
+                        exit_code,
+                        round,
+                    };
+                }
             }
         }
     }
-    AdversarialOutcome::ExhaustedRounds
+
+    output::av_exhausted(last_score, av_config.threshold, av_config.max_rounds);
+    AdversarialOutcome::ExhaustedRounds {
+        final_score: last_score,
+    }
 }
-```
-
-### Reviewer Session Naming
-
-The reviewer gets its own session name to avoid colliding with the worker:
-
-```
-worker:   impl-logi-feat
-reviewer: impl-logi-feat-av-1  (round 1)
-reviewer: impl-logi-feat-av-2  (round 2)
 ```
 
 ## Configuration
@@ -240,165 +349,187 @@ reviewer: impl-logi-feat-av-2  (round 2)
 
 ```rust
 pub struct AdversarialConfig {
-    pub max_rounds: u32,        // CLAUDE_AV_ROUNDS (default: 3)
-    pub reviewer_model: Option<String>,  // CLAUDE_AV_MODEL
-    pub custom_prompt: Option<String>,   // --av-prompt
+    pub max_rounds: u32,                 // --av-rounds / CLAUDE_AV_ROUNDS (default: 3)
+    pub threshold: u32,                  // --av-threshold / CLAUDE_AV_THRESHOLD (default: 95)
+    pub spec_file: Option<String>,       // --av-spec
+    pub reviewer_model: Option<String>,  // --av-model / CLAUDE_AV_MODEL
+    pub custom_prompt: Option<String>,   // --av-prompt (file path or inline)
 }
 ```
 
-### Integration with Existing Config
-
-`AdversarialConfig` is a separate struct (not bolted onto `Config`) because:
-- It's only relevant when `--adversarial-verify` is active
-- It has its own distinct env vars
-- Keeps the existing `Config` clean for the common case
+Separate from `Config` — only constructed when `--av` is present.
 
 ## Execution Order
 
-When both `--verify` and `--adversarial-verify` are present:
+When both `--verify` and `--av` are present:
 
 ```
-Worker → Deterministic Verify Loop → Adversarial Verify Loop
-                                            │
-                                     (on fix, re-run deterministic verify too)
+Worker → Verify Loop → Adversarial Loop
+                              │
+                        ┌─────┴──────┐
+                        │  reviewer   │
+                        │  scores     │
+                        └─────┬──────┘
+                         < threshold?
+                              │
+                        worker fixes
+                              │
+                        re-run verify loop
+                              │
+                        back to reviewer
 ```
 
-The deterministic verify runs **first** because:
-1. It's fast and cheap (no API calls)
-2. No point having the reviewer look at code that doesn't even compile/pass tests
-3. After the reviewer's fixes, we re-run deterministic verify to ensure the
-   fix didn't break anything
+Deterministic verify runs first because:
+1. It's fast and free (no API calls)
+2. No point scoring code that doesn't compile
+3. After worker fixes reviewer feedback, re-run verify to catch regressions
 
-### Full Combined Loop
+## Reviewer Session Naming
 
 ```
-1. Worker runs
-2. --verify loop runs (up to verify_max rounds)
-3. If --verify passes:
-   a. Reviewer runs (round 1)
-   b. If FAIL: worker fixes, then re-run --verify loop, then back to (a)
-   c. If PASS: done
-   d. Repeat up to av_rounds
-4. Exit
+worker:   impl-logi-feat
+reviewer: impl-logi-feat-av-1  (round 1)
+reviewer: impl-logi-feat-av-2  (round 2)
 ```
 
-## New Module: `src/adversarial.rs`
+Each review round gets a fresh session (no `--continue`). The reviewer must
+evaluate the current state from scratch, not build on its previous review.
+
+## Runner Change: Capturing Stdout
+
+The current `run_claude()` inherits stdout (streams to terminal). The reviewer
+needs stdout **captured** for verdict parsing.
+
+Add a new method to `CommandRunner`:
 
 ```rust
-// New types
-pub struct AdversarialConfig { ... }
-pub enum ReviewVerdict { Pass, Fail { issues: Vec<String> }, NoVerdict }
-pub enum AdversarialOutcome {
-    Passed { round: u32 },
-    ExhaustedRounds,
-    WorkerFailed { exit_code: i32, round: u32 },
-    ReviewerFailed { exit_code: i32, round: u32 },
+#[async_trait]
+pub trait CommandRunner: Send + Sync {
+    async fn run_claude(&self, args: &[String]) -> io::Result<RunResult>;
+    async fn run_claude_capturing(&self, args: &[String]) -> io::Result<RunResult>;
+    async fn run_shell(&self, cmd: &str) -> io::Result<RunResult>;
 }
-
-// New functions
-pub fn build_review_prompt(original_prompt: &str, round: u32) -> String
-pub fn build_fix_prompt(issues: &[String]) -> String
-pub fn parse_verdict(output: &str) -> ReviewVerdict
-pub async fn run_adversarial_loop<R: CommandRunner>(...) -> AdversarialOutcome
 ```
+
+`run_claude_capturing` pipes stdout and captures it in `RunResult.stdout`.
+Stderr is still streamed to terminal and captured in `RunResult.stderr`.
+The reviewer's output is also printed to the terminal (tee'd) so the user
+can follow along.
 
 ## Changes to Existing Modules
 
 | Module | Change |
 |--------|--------|
-| `cli.rs` | Add `--adversarial-verify`, `--av-prompt`, `--av-rounds`, `--av-model` |
-| `config.rs` | Add `AdversarialConfig::from_env()` |
+| `cli.rs` | Add `--av`, `--av-spec`, `--av-threshold`, `--av-rounds`, `--av-model`, `--av-prompt` flags |
 | `lib.rs` | Wire adversarial loop after verify loop |
-| `output.rs` | Add `adversarial_round()`, `adversarial_passed()`, etc. |
-| `runner.rs` | Add `run_claude_capturing()` variant that captures stdout |
+| `output.rs` | Add `av_round()`, `av_score()`, `av_passed()`, `av_fixing()`, `av_exhausted()`, `av_no_verdict()` |
+| `runner.rs` | Add `run_claude_capturing()` to trait + `TokioCommandRunner` impl |
 
-### Runner Change: Capturing Stdout
-
-The current `run_claude()` streams stdout to terminal (inherits). The reviewer
-needs stdout **captured** so we can parse the verdict. Two options:
-
-**Option A: New method on `CommandRunner`**
-```rust
-async fn run_claude_capturing(&self, args: &[String]) -> io::Result<RunResult>;
-```
-This pipes stdout instead of inheriting it. We still stream stderr. The captured
-stdout is returned in `RunResult.stdout`.
-
-**Option B: Use `--output-format json` flag**
-Claude supports `--output-format json` which writes structured output. We could
-parse the JSON for the final response text.
-
-**Recommendation: Option A.** It's simpler, more reliable, and doesn't depend
-on Claude's JSON output format staying stable.
+New module: `src/adversarial.rs` — config, verdict parsing, prompt building,
+loop orchestration.
 
 ## Example Usage
 
-### Basic adversarial review
 ```bash
-claude-run --adversarial-verify "implement user authentication"
+# Basic: worker implements spec, reviewer audits
+claude-run --av --av-spec spec.md "implement the spec in spec.md"
+
+# With tests: tests must pass, then reviewer audits
+claude-run --av --av-spec spec.md --verify "make ci" "implement the spec"
+
+# Higher bar
+claude-run --av --av-threshold 100 --av-spec spec.md "implement the spec"
+
+# More retries, stronger reviewer
+claude-run --av --av-rounds 5 --av-model opus "implement the spec"
+
+# Lower bar for drafts
+claude-run --av --av-threshold 80 --av-spec spec.md "implement the spec"
 ```
 
-### With deterministic verify too
-```bash
-claude-run --adversarial-verify --verify "make ci" "implement user authentication"
-```
+## Terminal Output
 
-### Reviewer uses a different (stronger) model
-```bash
-claude-run --av-model opus --adversarial-verify "implement user authentication"
 ```
+╭───────────────────────────────────────╮
+│  claude-run  session: impl-spec-feat  │
+│  verify: make ci                      │
+│  adversarial: spec.md (threshold: 95) │
+│  started: 2026-04-01 10:30:00         │
+╰───────────────────────────────────────╯
 
-### Custom reviewer prompt from file
-```bash
-claude-run --av-prompt security-review.txt --adversarial-verify "implement user authentication"
-```
+[Claude working...]
 
-### Limit review rounds
-```bash
-claude-run --av-rounds 1 --adversarial-verify "implement user authentication"
+✓ Verification passed (round 1)
+
+⚔ Adversarial review (round 1/3)
+  Reviewer scoring against spec.md...
+  Score: 72/100 (threshold: 95)
+  Missing: 3 items | Partial: 2 items | Incorrect: 1 item
+
+⚔ Sending worker back to address 6 issues...
+[Claude fixing...]
+
+✓ Verification passed (round 1)
+
+⚔ Adversarial review (round 2/3)
+  Reviewer scoring against spec.md...
+  Score: 91/100 (threshold: 95)
+  Missing: 0 items | Partial: 1 item | Incorrect: 1 item
+
+⚔ Sending worker back to address 2 issues...
+[Claude fixing...]
+
+✓ Verification passed (round 1)
+
+⚔ Adversarial review (round 3/3)
+  Reviewer scoring against spec.md...
+  Score: 98/100 (threshold: 95)
+
+✓ Adversarial review passed (98/100, round 3)
+
+✓ Done: impl-spec-feat
 ```
 
 ## Edge Cases & Failure Modes
 
-### Reviewer hallucinates issues
-The reviewer might flag non-issues. Mitigations:
-- The prompt instructs "only flag genuine issues"
+### Score inflation
+The reviewer might be too generous. Mitigations:
+- Prompt explicitly says "your job is to find gaps, not be encouraging"
+- Default threshold is high (95) so even generous scores need near-completeness
+- `--av-model` lets you use a more critical model
+
+### Score deflation / hallucinated gaps
+The reviewer might flag things that are actually implemented. Mitigations:
+- Prompt requires citing file paths and line numbers (grounds claims)
+- After the worker "fixes" (or does nothing because it's already done), the
+  next review round should score higher
 - Round limit prevents infinite loops
-- The worker can "fix" by explaining in a comment why it's not an issue
-  (the reviewer in the next round may then PASS)
 
-### Worker undoes previous fix
-The worker might fix issue A but reintroduce issue B. Mitigations:
-- Each review round sees the full current state
-- Combining with `--verify` catches regressions
-
-### Reviewer never passes
-Max rounds (default 3) prevents infinite loops. The orchestrator reports
-`ExhaustedRounds` and exits non-zero, same as the deterministic verify.
+### Worker adds TODOs instead of implementations
+The fix prompt explicitly says "Do not add TODO comments — write the actual
+implementation." The reviewer in the next round will also catch this since
+TODOs get scored as partial implementations (-5 to -10).
 
 ### Reviewer rate-limited
-The reviewer runs through the same `run_with_retry` mechanism, so it gets
-the same exponential backoff and daily cap handling as the worker.
+The reviewer launches through `run_with_retry`, getting the same backoff
+and daily cap handling as the worker.
 
-### Both processes write to the same files
-This is safe because they run **sequentially**, never concurrently. The worker
-writes, then the reviewer reads (and doesn't write — it's `--permission-mode
-bypassPermissions` but its prompt only asks it to review, not modify).
+### Spec file doesn't exist
+If `--av-spec` points to a nonexistent file, the reviewer will report it
+can't find the spec. The orchestrator could also validate the path upfront
+and fail fast with a clear error.
 
-## Future Extensions (Out of Scope)
-
-- **Multi-reviewer panel**: Run N reviewers in parallel, majority vote
-- **Specialized reviewers**: Security reviewer, performance reviewer, etc.
-- **Review memory**: Feed previous round's review into the next round for continuity
-- **Confidence scoring**: Reviewer rates confidence in each issue
-- **Git worktree isolation**: Run reviewer in a separate worktree for true isolation
+### Score not parseable
+Treated as `NoVerdict` → score 0 → worker gets sent back with generic
+"implement the spec more completely" guidance.
 
 ## Implementation Plan
 
-1. Add `adversarial.rs` with config, verdict parsing, prompt building
-2. Add `run_claude_capturing()` to `CommandRunner` trait
-3. Wire up CLI flags in `cli.rs`
-4. Add output formatting in `output.rs`
-5. Integrate into `lib.rs` execution flow
-6. Tests for verdict parsing, prompt building, loop behavior
-7. Integration test with mock runner
+1. `src/adversarial.rs` — `AdversarialConfig`, `ReviewScore`, `ReviewVerdict`,
+   `parse_verdict()`, `build_review_prompt()`, `build_fix_prompt()`,
+   `run_adversarial_loop()`
+2. `src/runner.rs` — add `run_claude_capturing()` to `CommandRunner` trait
+3. `src/cli.rs` — add `--av*` flags, wire into `Cli` struct
+4. `src/output.rs` — add adversarial output functions
+5. `src/lib.rs` — integrate adversarial loop after verify loop
+6. Tests: verdict parsing, prompt building, loop with mock runner
