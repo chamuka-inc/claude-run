@@ -9,6 +9,9 @@ pub struct Config {
     pub verify_max: u32,
     pub daily_cap_poll: Duration,
     pub daily_cap_timeout: Duration,
+    pub av_threshold: u32,
+    pub av_rounds: u32,
+    pub av_model: Option<String>,
 }
 
 impl Default for Config {
@@ -21,6 +24,9 @@ impl Default for Config {
             verify_max: 5,
             daily_cap_poll: Duration::from_secs(300),
             daily_cap_timeout: Duration::from_secs(28800),
+            av_threshold: 95,
+            av_rounds: 3,
+            av_model: None,
         }
     }
 }
@@ -50,6 +56,17 @@ impl Config {
         if let Some(v) = parse_env_u64("CLAUDE_DAILY_CAP_TIMEOUT") {
             cfg.daily_cap_timeout = Duration::from_secs(v);
         }
+        if let Some(v) = parse_env_u64("CLAUDE_AV_THRESHOLD") {
+            cfg.av_threshold = v as u32;
+        }
+        if let Some(v) = parse_env_u64("CLAUDE_AV_ROUNDS") {
+            cfg.av_rounds = v as u32;
+        }
+        if let Ok(v) = std::env::var("CLAUDE_AV_MODEL") {
+            if !v.is_empty() {
+                cfg.av_model = Some(v);
+            }
+        }
 
         cfg
     }
@@ -76,14 +93,20 @@ mod tests {
     }
 
     #[test]
+    fn av_defaults() {
+        let cfg = Config::default();
+        assert_eq!(cfg.av_threshold, 95);
+        assert_eq!(cfg.av_rounds, 3);
+        assert!(cfg.av_model.is_none());
+    }
+
+    #[test]
     fn from_env_reads_overrides() {
-        // Use unique prefix to avoid test interference
         std::env::set_var("CLAUDE_MAX_RETRIES", "20");
         std::env::set_var("CLAUDE_NOTIFY", "0");
         let cfg = Config::from_env();
         assert_eq!(cfg.max_retries, 20);
         assert!(!cfg.notify);
-        // Clean up
         std::env::remove_var("CLAUDE_MAX_RETRIES");
         std::env::remove_var("CLAUDE_NOTIFY");
     }
@@ -92,7 +115,18 @@ mod tests {
     fn from_env_ignores_invalid_values() {
         std::env::set_var("CLAUDE_MAX_RETRIES", "not_a_number");
         let cfg = Config::from_env();
-        assert_eq!(cfg.max_retries, 10); // falls back to default
+        assert_eq!(cfg.max_retries, 10);
         std::env::remove_var("CLAUDE_MAX_RETRIES");
+    }
+
+    #[test]
+    fn from_env_reads_av_overrides() {
+        std::env::set_var("CLAUDE_AV_THRESHOLD", "90");
+        std::env::set_var("CLAUDE_AV_ROUNDS", "5");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.av_threshold, 90);
+        assert_eq!(cfg.av_rounds, 5);
+        std::env::remove_var("CLAUDE_AV_THRESHOLD");
+        std::env::remove_var("CLAUDE_AV_ROUNDS");
     }
 }

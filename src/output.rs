@@ -1,6 +1,11 @@
 use colored::Colorize;
 
-pub fn banner(session_name: &str, verify_cmd: Option<&str>) {
+pub fn banner(
+    session_name: &str,
+    verify_cmd: Option<&str>,
+    av: Option<(&str, u32)>,
+    pipeline_file: Option<&str>,
+) {
     let ts = chrono_now();
     println!(
         "{}",
@@ -19,12 +24,30 @@ pub fn banner(session_name: &str, verify_cmd: Option<&str>) {
         format!("Started: {ts}").dimmed(),
         "│".cyan()
     );
+    if let Some(path) = pipeline_file {
+        println!(
+            "{} {} {:<40} {}",
+            "│".cyan(),
+            "Pipeline:".cyan().bold(),
+            path,
+            "│".cyan()
+        );
+    }
     if let Some(cmd) = verify_cmd {
         println!(
             "{} {} {:<40} {}",
             "│".cyan(),
             "Verify:".magenta(),
             cmd,
+            "│".cyan()
+        );
+    }
+    if let Some((spec, threshold)) = av {
+        println!(
+            "{} {} {:<40} {}",
+            "│".cyan(),
+            "Adversarial:".yellow(),
+            format!("{spec} (threshold: {threshold})"),
             "│".cyan()
         );
     }
@@ -56,11 +79,15 @@ pub fn resuming(session_name: &str) {
 
 pub fn verify_round(round: u32, max: u32, cmd: &str) {
     println!();
-    println!(
-        "{} (round {round}/{max}): {}",
-        "Verifying".magenta().bold(),
-        cmd.dimmed()
-    );
+    if max > 0 {
+        println!(
+            "{} (round {round}/{max}): {}",
+            "Verifying".magenta().bold(),
+            cmd.dimmed()
+        );
+    } else {
+        println!("{}: {}", "Verifying".magenta().bold(), cmd.dimmed());
+    }
     println!();
 }
 
@@ -71,10 +98,17 @@ pub fn verify_passed() {
 
 pub fn verify_failed(exit_code: i32) {
     println!();
-    println!(
-        "{} (exit {exit_code}). Sending Claude back in...",
-        "Verification failed".yellow().bold(),
-    );
+    if exit_code != 0 {
+        println!(
+            "{} (exit {exit_code}). Sending Claude back in...",
+            "Verification failed".yellow().bold(),
+        );
+    } else {
+        println!(
+            "{}. Sending Claude back in...",
+            "Verification failed".yellow().bold(),
+        );
+    }
 }
 
 pub fn verify_exhausted(max: u32) {
@@ -122,8 +156,90 @@ pub fn done(session_name: &str) {
     );
 }
 
+// ─── Parallel execution output ─────────────────────────────────────
+
+pub fn parallel_start(count: usize) {
+    println!();
+    println!("{} ({count} steps)", "Running in parallel".cyan().bold(),);
+}
+
+pub fn parallel_done() {
+    println!("{}", "Parallel steps complete.".cyan(),);
+}
+
+// ─── Adversarial verification output ───────────────────────────────
+
+pub fn av_round(round: u32, max: u32) {
+    println!();
+    println!(
+        "{} (round {round}/{max})",
+        "Adversarial review".yellow().bold(),
+    );
+}
+
+pub fn av_score(score: u32, threshold: u32, missing: usize, partial: usize, incorrect: usize) {
+    let score_str = format!("{score}/100");
+    let threshold_str = format!("(threshold: {threshold})");
+
+    if score >= threshold {
+        println!(
+            "  Score: {} {}",
+            score_str.green().bold(),
+            threshold_str.dimmed()
+        );
+    } else {
+        println!(
+            "  Score: {} {}",
+            score_str.yellow().bold(),
+            threshold_str.dimmed()
+        );
+    }
+
+    if missing + partial + incorrect > 0 {
+        println!(
+            "  Missing: {} | Partial: {} | Incorrect: {}",
+            missing, partial, incorrect
+        );
+    }
+}
+
+pub fn av_passed(score: u32) {
+    println!();
+    println!(
+        "{} ({score}/100)",
+        "Adversarial review passed.".green().bold()
+    );
+}
+
+pub fn av_fixing(issues: usize) {
+    println!();
+    println!(
+        "{} Sending worker back to address {issues} issue(s)...",
+        "Fix needed.".yellow().bold(),
+    );
+}
+
+pub fn av_exhausted(score: u32, threshold: u32, max_rounds: u32) {
+    println!();
+    eprintln!(
+        "{}",
+        format!(
+            "Adversarial review still below threshold ({score}/{threshold}) after {max_rounds} rounds."
+        )
+        .red()
+        .bold()
+    );
+}
+
+pub fn av_no_verdict() {
+    println!();
+    println!(
+        "{}",
+        "Reviewer did not produce a parseable verdict (treating as score 0).".yellow()
+    );
+}
+
 fn chrono_now() -> String {
-    // Simple timestamp without pulling in chrono crate
     use std::process::Command;
     Command::new("date")
         .arg("+%Y-%m-%d %H:%M:%S")

@@ -28,3 +28,43 @@ fn version_flag() {
         .success()
         .stdout(predicate::str::contains("claude-run"));
 }
+
+#[test]
+fn pipeline_with_verify_is_error() {
+    Command::cargo_bin("claude-run")
+        .unwrap()
+        .args(["--pipeline", "test.yaml", "--verify", "make test"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be combined"));
+}
+
+#[test]
+fn pipeline_with_prompt_is_error() {
+    Command::cargo_bin("claude-run")
+        .unwrap()
+        .args(["--pipeline", "test.yaml", "some prompt"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be combined"));
+}
+
+#[test]
+fn pipeline_with_av_is_error() {
+    Command::cargo_bin("claude-run")
+        .unwrap()
+        .args(["--pipeline", "test.yaml", "--av"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be combined"));
+}
+
+#[test]
+fn help_mentions_pipeline() {
+    Command::cargo_bin("claude-run")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--pipeline"));
+}
